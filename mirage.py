@@ -10,15 +10,30 @@ class RateLimiter:
     def __init__(self, requests_per_second: int = 10):
         self.requests_per_second = requests_per_second
         self.last_request = datetime.now()
+        self.tokens = requests_per_second
+        self.last_refill = datetime.now()
 
     def wait_if_needed(self):
-        """don't exceed 10 requests per second and maintain 100ms spacin to avoid rate limite"""
         now = datetime.now()
-        time_since_last = (now - self.last_request).total_seconds()
+        time_since_last = (now - self.last_refill).total_seconds()
 
-        if time_since_last < 0.1:
-            time.sleep(0.1 - time_since_last)
+        # refill tokens based on time passed
+        if time_since_last > 1:
+            self.tokens = self.requests_per_second
+            self.last_refill = now
+        else:
+            self.tokens += time_since_last * self.requests_per_second
 
+        # ensure tokens do not exceed the bucket size
+        self.tokens = min(self.tokens, self.requests_per_second)
+
+        # wait if no tokens available 
+        if self.tokens < 1:
+            sleep_time = 1 - time_since_last
+            time.sleep(sleep_time)
+            self.tokens = 1
+
+        self.tokens -= 1
         self.last_request = datetime.now()
 
 
@@ -40,15 +55,38 @@ class MerakiManager:
                 retry_4xx_error_wait_time=15,
                 maximum_retries=3,
             )
-            # get first organization (single org use case)
+            # get first organization (single org use case sorry)
             orgs = self.dashboard.organizations.getOrganizations()
             if not orgs:
-                raise Exception("No organizations found")
+                raise Exception("No organizations found D:")
             self.organization_id = orgs[0]["id"]
             return True
         except Exception as e:
             print(f"API initialization failed: {e}")
             return False
+
+    def log_api_call(self, method: str, endpoint: str, status_code: int, response_time: float):
+        log_entry = {
+            "timestamp": datetime.now().isoformat(),
+            "method": method,
+            "endpoint": endpoint,
+            "status_code": status_code,
+            "response_time": response_time
+        }
+        # log to file for debug(mostlikely too much api usage)
+        with open("api_log.txt", "a") as log_file:
+            log_file.write(json.dumps(log_entry) + "\n")
+
+    def get_configuration_changes(self, timespan: int = 3600) -> List[Dict]:
+        try:
+            self.rate_limiter.wait_if_needed()
+            changes = self.dashboard.organizations.getOrganizationConfigurationChanges(
+                self.organization_id, timespan=timespan
+            )
+            return changes
+        except Exception as e:
+            print(f"Error fetching configuration changes: {e}")
+            return []
 
     def get_networks(self) -> List[Dict]:
         try:
@@ -58,10 +96,31 @@ class MerakiManager:
             )
             return self.networks
         except Exception as e:
-            print(
-                f"Error fetching networks(try creating a dedicated api key for mirage): {e}"
-            )
+            print(f"Error fetching networks: {e}")
             return []
+
+    def get_devices(self) -> List[Dict]:
+        try:
+            self.rate_limiter.wait_if_needed()
+            devices = self.dashboard.organizations.getOrganizationDevices(
+                self.organization_id, total_pages="all"
+            )
+            return devices
+        except Exception as e:
+            print(f"Error fetching devices: {e}")
+            return []
+
+
+    def create_action_batch(self, actions: List[Dict], confirmed: bool = False, synchronous: bool = False) -> Dict:
+        try:
+            self.rate_limiter.wait_if_needed()
+            response = self.dashboard.organizations.createOrganizationActionBatch(
+                self.organization_id, actions=actions, confirmed=confirmed, synchronous=synchronous
+            )
+            return response
+        except Exception as e:
+            print(f"Error creating action batch: {e}")
+            return {}
 
     def get_l7_rules(self, network_id: str) -> List[Dict]:
         try:
@@ -405,13 +464,13 @@ class GUI:
                     )
 
     def handle_filter_input(self, app_data: str, multi_select: bool):
-        """handle filter input while maintaining focus."""
+        """filter input while maintaining focus."""
         self.network_filter = app_data
         self.update_network_table(multi_select)
         dpg.focus_item("network_filter")
 
     def update_network_table(self, multi_select: bool):
-        """update the network table based on current filter."""
+        """update network table based on current filter."""
         # clear existing rows while preserving header
         for child in dpg.get_item_children("networks_table", slot=1):
             dpg.delete_item(child)
@@ -451,7 +510,7 @@ class GUI:
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            # Header
+            # header
             with dpg.group(horizontal=True):
                 dpg.add_text("Baseline Network:", color=(255, 255, 0))
                 dpg.add_text(self.get_network_name(self.selected_baseline))
@@ -595,7 +654,7 @@ class GUI:
         if self.meraki.initialize_api(api_key):
             dpg.hide_item("auth_window")
             dpg.show_item("main_window")
-            self.show_status("et me cook...")
+            self.show_status("Let me cook...")
             self.meraki.get_networks()
             if self.meraki.networks:
                 self.show_status("Successfully connected!")
@@ -633,7 +692,6 @@ class GUI:
             self.show_l7_deployment_interface()
 
     def show_public_ips_content(self):
-        """Display the 'Public IPs' section in the central content window."""
         dpg.delete_item(
             "content_window", children_only=True
         )  # clear the central content window
