@@ -4,6 +4,7 @@ from typing import Optional, List, Dict
 import time
 from datetime import datetime
 import csv
+import json
 
 
 class RateLimiter:
@@ -27,7 +28,7 @@ class RateLimiter:
         # ensure tokens do not exceed the bucket size
         self.tokens = min(self.tokens, self.requests_per_second)
 
-        # wait if no tokens available 
+        # wait if no tokens available
         if self.tokens < 1:
             sleep_time = 1 - time_since_last
             time.sleep(sleep_time)
@@ -109,7 +110,6 @@ class MerakiManager:
         except Exception as e:
             print(f"Error fetching devices: {e}")
             return []
-
 
     def create_action_batch(self, actions: List[Dict], confirmed: bool = False, synchronous: bool = False) -> Dict:
         try:
@@ -254,7 +254,6 @@ class MerakiManager:
                 csv_writer.writerow(record)
         print("Detailed WAN IPs saved to wan_ips_detailed.csv")
 
-
     def check_amp_status(self) -> Dict[str, bool]:
         amp_statuses = {}
         for network in self.networks:
@@ -291,7 +290,6 @@ class MerakiManager:
                 }
         return ids_ips_statuses
 
-
     def check_port_forwarding_status(self) -> Dict[str, List[Dict]]:
         insecure_rules = {}
         for network in self.networks:
@@ -310,6 +308,34 @@ class MerakiManager:
                 insecure_rules[network_id] = []
         return insecure_rules
 
+    def parse_l3_rules_csv(self, file_path: str) -> List[Dict]:
+        rules = []
+        with open(file_path, mode='r') as csv_file:
+            csv_reader = csv.DictReader(csv_file)
+            for row in csv_reader:
+                rules.append({
+                    'comment': row.get('comment', ''),
+                    'policy': row.get('policy', 'allow'),
+                    'protocol': row.get('protocol', 'tcp'),
+                    'destPort': row.get('destPort', 'Any'),
+                    'destCidr': row.get('destCidr', 'Any'),
+                    'srcPort': row.get('srcPort', 'Any'),
+                    'srcCidr': row.get('srcCidr', 'Any'),
+                    'syslogEnabled': row.get('syslogEnabled', 'False').lower() == 'true'
+                })
+        return rules
+
+    def deploy_l3_rules(self, target_network_id: str, rules: List[Dict]) -> bool:
+        try:
+            self.rate_limiter.wait_if_needed()
+            self.dashboard.appliance.updateNetworkApplianceFirewallCellularFirewallRules(
+                target_network_id, rules=rules
+            )
+            return True
+        except Exception as e:
+            print(f"Error deploying L3 rules to network {target_network_id}: {e}")
+            return False
+
 
 class GUI:
     def __init__(self):
@@ -318,6 +344,7 @@ class GUI:
         self.selected_targets: List[str] = []
         self.network_filter: str = ""
         self.sort_ascending: bool = True
+        self.l3_rules: List[Dict] = []
 
     def setup_gui(self):
         dpg.create_context()
@@ -330,7 +357,7 @@ class GUI:
             no_move=True,
             no_collapse=True,
         ):
-            dpg.add_input_text(label="API Key", tag="api_key_input", password=True)
+            dpg.add_input_text(label="API Key", tag="api_key_input", password=True, callback=lambda s, a: self.authenticate() if a else None, on_enter=True)
             dpg.add_button(label="Connect", callback=self.authenticate)
 
         # main Window
@@ -357,7 +384,7 @@ class GUI:
                         dpg.add_button(
                             label="L7 Rules", callback=self.show_l7_rules, width=-1
                         )
-                        dpg.add_button(label="L3 Rules", width=-1)
+                        dpg.add_button(label="L3 Rules", callback=self.show_l3_rules, width=-1)
                     with dpg.collapsing_header(label="Assessment", default_open=True):
                         dpg.add_button(
                             label="Public IPs",
@@ -722,8 +749,6 @@ class GUI:
         self.meraki.generate_detailed_wan_info()
         self.show_status("Detailed WAN Info extracted!")
 
-
-
     def show_amp_status(self):
         dpg.delete_item("content_window", children_only=True)
 
@@ -826,6 +851,97 @@ class GUI:
 
             dpg.add_spacer(height=20)
 
+    def show_l3_rules(self):
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            dpg.add_text("L3 Rules Deployment", color=(255, 255, 0), indent=10)
+            dpg.add_spacer(height=10)
+
+            dpg.add_button(label="Load L3 Rules CSV", callback=self.load_l3_rules_csv, width=200)
+            dpg.add_spacer(height=10)
+
+            if self.l3_rules:
+                dpg.add_text("Loaded L3 Rules:", color=(255, 255, 0))
+                dpg.add_spacer(height=5)
+
+                with dpg.table(
+                    header_row=True,
+                    borders_innerH=True,
+                    borders_outerH=True,
+                    borders_innerV=True,
+                    borders_outerV=True,
+                ):
+                    dpg.add_table_column(label="Policy", width=100)
+                    dpg.add_table_column(label="Protocol", width=100)
+                    dpg.add_table_column(label="Destination Port", width=150)
+                    dpg.add_table_column(label="Destination CIDR", width=150)
+                    dpg.add_table_column(label="Source Port", width=150)
+                    dpg.add_table_column(label="Source CIDR", width=150)
+                    dpg.add_table_column(label="Syslog Enabled", width=100)
+
+                    for rule in self.l3_rules:
+                        with dpg.table_row():
+                            dpg.add_text(rule["policy"])
+                            dpg.add_text(rule["protocol"])
+                            dpg.add_text(rule["destPort"])
+                            dpg.add_text(rule["destCidr"])
+                            dpg.add_text(rule["srcPort"])
+                            dpg.add_text(rule["srcCidr"])
+                            dpg.add_text(str(rule["syslogEnabled"]))
+
+                dpg.add_spacer(height=20)
+                dpg.add_button(label="Select Target Networks", callback=lambda: self.show_network_selection("Select Target Networks for L3 Rules", True), width=200)
+
+                if self.selected_targets:
+                    dpg.add_spacer(height=10)
+                    dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
+                    dpg.add_spacer(width=10)
+                    dpg.add_button(label="Deploy L3 Rules", callback=self.deploy_l3_rules, width=200)
+
+    def load_l3_rules_csv(self):
+        with dpg.file_dialog(
+            label="Load L3 Rules CSV",
+            width=600,
+            height=400,
+            callback=self.handle_l3_rules_csv_load,
+            show=False,
+            modal=True,
+            default_path=".",
+            file_count=1,
+            tag="l3_rules_file_dialog"  # Assign a unique tag to the file dialog
+        ):
+            dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
+
+        dpg.show_item("l3_rules_file_dialog")  # Show the file dialog using its unique tag
+
+    def handle_l3_rules_csv_load(self, sender, app_data):
+        if app_data["file_path_name"]:
+            file_path = app_data["file_path_name"]
+            self.l3_rules = self.meraki.parse_l3_rules_csv(file_path)
+            self.show_l3_rules()
+        else:
+            self.show_status("No file selected.")
+
+    def deploy_l3_rules(self):
+        if not self.selected_targets:
+            self.show_status("Please select target networks first")
+            return
+
+        self.show_status("Starting L3 rules deployment...")
+        success_count = 0
+        total = len(self.selected_targets)
+
+        for idx, target_id in enumerate(self.selected_targets, 1):
+            network_name = self.get_network_name(target_id)
+            self.show_status(f"Deploying L3 rules to {network_name} ({idx}/{total})")
+
+            if self.meraki.deploy_l3_rules(target_id, self.l3_rules):
+                success_count += 1
+
+        self.show_status(
+            f"L3 rules deployment complete: {success_count}/{total} successful", duration=5000
+        )
 
     def run(self):
         viewport_width = 1024
