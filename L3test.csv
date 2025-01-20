@@ -1,0 +1,6 @@
+comment,policy,protocol,destPort,destCidr,srcPort,srcCidr,syslogEnabled
+Allow HTTP traffic,allow,tcp,80,192.168.1.0/24,Any,Any,False
+Block SSH traffic,deny,tcp,22,Any,Any,Any,True
+Allow DNS traffic,allow,udp,53,192.168.2.0/24,Any,Any,False
+Block ICMP traffic,deny,icmp,Any,Any,Any,Any,True
+Allow HTTPS traffic,allow,tcp,443,192.168.3.0/24,Any,Any,False
