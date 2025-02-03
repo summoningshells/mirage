@@ -66,13 +66,15 @@ class MerakiManager:
             print(f"API initialization failed: {e}")
             return False
 
-    def log_api_call(self, method: str, endpoint: str, status_code: int, response_time: float):
+    def log_api_call(
+        self, method: str, endpoint: str, status_code: int, response_time: float
+    ):
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "method": method,
             "endpoint": endpoint,
             "status_code": status_code,
-            "response_time": response_time
+            "response_time": response_time,
         }
         # log to file for debug(mostlikely too much api usage)
         with open("api_log.txt", "a") as log_file:
@@ -111,11 +113,16 @@ class MerakiManager:
             print(f"Error fetching devices: {e}")
             return []
 
-    def create_action_batch(self, actions: List[Dict], confirmed: bool = False, synchronous: bool = False) -> Dict:
+    def create_action_batch(
+        self, actions: List[Dict], confirmed: bool = False, synchronous: bool = False
+    ) -> Dict:
         try:
             self.rate_limiter.wait_if_needed()
             response = self.dashboard.organizations.createOrganizationActionBatch(
-                self.organization_id, actions=actions, confirmed=confirmed, synchronous=synchronous
+                self.organization_id,
+                actions=actions,
+                confirmed=confirmed,
+                synchronous=synchronous,
             )
             return response
         except Exception as e:
@@ -275,19 +282,18 @@ class MerakiManager:
             network_id = network["id"]
             try:
                 self.rate_limiter.wait_if_needed()
-                response = self.dashboard.appliance.getNetworkApplianceSecurityIntrusion(
-                    network_id
+                response = (
+                    self.dashboard.appliance.getNetworkApplianceSecurityIntrusion(
+                        network_id
+                    )
                 )
                 ids_ips_statuses[network_id] = {
                     "mode": response.get("mode", "disabled"),
-                    "ruleset": response.get("idsRulesets", "none")
+                    "ruleset": response.get("idsRulesets", "none"),
                 }
             except Exception as e:
                 print(f"Error fetching IDS/IPS status for network {network_id}: {e}")
-                ids_ips_statuses[network_id] = {
-                    "mode": "error",
-                    "ruleset": "error"
-                }
+                ids_ips_statuses[network_id] = {"mode": "error", "ruleset": "error"}
         return ids_ips_statuses
 
     def check_port_forwarding_status(self) -> Dict[str, List[Dict]]:
@@ -304,25 +310,28 @@ class MerakiManager:
                     rule for rule in rules if "any" in rule.get("allowedIps", [])
                 ]
             except Exception as e:
-                print(f"Error fetching port forwarding rules for network {network_id}: {e}")
+                print(
+                    f"Error fetching port forwarding rules for network {network_id}: {e}"
+                )
                 insecure_rules[network_id] = []
         return insecure_rules
 
     def parse_l3_rules_csv(self, file_path: str) -> List[Dict]:
         rules = []
-        with open(file_path, mode='r') as csv_file:
+        with open(file_path, mode="r") as csv_file:
             csv_reader = csv.DictReader(csv_file)
             for row in csv_reader:
-                rules.append({
-                    'comment': row.get('comment', ''),
-                    'policy': row.get('policy', 'allow'),
-                    'protocol': row.get('protocol', 'tcp'),
-                    'destPort': row.get('destPort', 'Any'),
-                    'destCidr': row.get('destCidr', 'Any'),
-                    'srcPort': row.get('srcPort', 'Any'),
-                    'srcCidr': row.get('srcCidr', 'Any'),
-                    'syslogEnabled': row.get('syslogEnabled', 'False').lower() == 'true'
-                })
+                rules.append(
+                    {
+                        "comment": row.get("comment", ""),
+                        "policy": row.get("policy", "allow"),
+                        "protocol": row.get("protocol", "tcp"),
+                        "destPort": row.get("destPort", "Any"),
+                        "destCidr": row.get("destCidr", "Any"),
+                        "srcPort": row.get("srcPort", "Any"),
+                        "srcCidr": row.get("srcCidr", "Any"),
+                    }
+                )
         return rules
 
     def deploy_l3_rules(self, target_network_id: str, rules: List[Dict]) -> bool:
@@ -357,7 +366,13 @@ class GUI:
             no_move=True,
             no_collapse=True,
         ):
-            dpg.add_input_text(label="API Key", tag="api_key_input", password=True, callback=lambda s, a: self.authenticate() if a else None, on_enter=True)
+            dpg.add_input_text(
+                label="API Key",
+                tag="api_key_input",
+                password=True,
+                callback=lambda s, a: self.authenticate() if a else None,
+                on_enter=True,
+            )
             dpg.add_button(label="Connect", callback=self.authenticate)
 
         # main Window
@@ -384,7 +399,9 @@ class GUI:
                         dpg.add_button(
                             label="L7 Rules", callback=self.show_l7_rules, width=-1
                         )
-                        dpg.add_button(label="L3 Rules", callback=self.show_l3_rules, width=-1)
+                        dpg.add_button(
+                            label="L3 Rules", callback=self.show_l3_rules, width=-1
+                        )
                     with dpg.collapsing_header(label="Assessment", default_open=True):
                         dpg.add_button(
                             label="Public IPs",
@@ -392,9 +409,19 @@ class GUI:
                             width=-1,
                         )
                         dpg.add_button(label="Attack Surface", width=-1)
-                        dpg.add_button(label="IPS/IPS Status", callback=self.show_ids_ips_status, width=-1)
-                        dpg.add_button(label="AMP Status", callback=self.show_amp_status, width=-1)
-                        dpg.add_button(label="Port Forwarding Check", callback=self.show_port_forwarding_check, width=-1)
+                        dpg.add_button(
+                            label="IPS/IPS Status",
+                            callback=self.show_ids_ips_status,
+                            width=-1,
+                        )
+                        dpg.add_button(
+                            label="AMP Status", callback=self.show_amp_status, width=-1
+                        )
+                        dpg.add_button(
+                            label="Port Forwarding Check",
+                            callback=self.show_port_forwarding_check,
+                            width=-1,
+                        )
 
                 # main content area - fills remaining space
                 with dpg.child_window(tag="content_window", border=False):
@@ -415,7 +442,7 @@ class GUI:
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            # header 
+            # header
             with dpg.group(horizontal=True):
                 dpg.add_text(title, color=(255, 255, 0))
                 dpg.add_spacer(width=20)
@@ -450,7 +477,6 @@ class GUI:
 
             dpg.add_spacer(height=10)
 
-            
             dpg.add_table(
                 header_row=True,
                 borders_innerH=True,
@@ -460,7 +486,7 @@ class GUI:
                 row_background=True,
                 tag="networks_table",
                 user_data=multi_select,
-            )  
+            )
 
             dpg.add_table_column(
                 label="Network Name",
@@ -479,7 +505,7 @@ class GUI:
 
             dpg.add_spacer(height=20)
 
-            # footer 
+            # footer
             if multi_select:
                 with dpg.group(horizontal=True):
                     dpg.add_text(f"Selected Networks: {len(self.selected_targets)}")
@@ -778,7 +804,9 @@ class GUI:
                             dpg.add_text(network["name"])
                             dpg.add_text(
                                 "Yes" if amp_enabled else "No",
-                                color=(100, 255, 100) if amp_enabled else (255, 100, 100),
+                                color=(100, 255, 100)
+                                if amp_enabled
+                                else (255, 100, 100),
                             )
 
             dpg.add_spacer(height=20)
@@ -808,12 +836,16 @@ class GUI:
 
                     for network in self.meraki.networks:
                         network_id = network["id"]
-                        status = ids_ips_statuses.get(network_id, {"mode": "error", "ruleset": "error"})
+                        status = ids_ips_statuses.get(
+                            network_id, {"mode": "error", "ruleset": "error"}
+                        )
                         with dpg.table_row():
                             dpg.add_text(network["name"])
                             dpg.add_text(
                                 status["mode"],
-                                color=(100, 255, 100) if status["mode"] == "prevention" else (255, 100, 100),
+                                color=(100, 255, 100)
+                                if status["mode"] == "prevention"
+                                else (255, 100, 100),
                             )
                             dpg.add_text(status["ruleset"])
 
@@ -829,7 +861,9 @@ class GUI:
             insecure_rules = self.meraki.check_port_forwarding_status()
 
             if not any(insecure_rules.values()):
-                dpg.add_text("No insecure port forwarding rules found", color=(255, 255, 0))
+                dpg.add_text(
+                    "No insecure port forwarding rules found", color=(255, 255, 0)
+                )
             else:
                 with dpg.table(
                     header_row=True,
@@ -858,7 +892,9 @@ class GUI:
             dpg.add_text("L3 Rules Deployment", color=(255, 255, 0), indent=10)
             dpg.add_spacer(height=10)
 
-            dpg.add_button(label="Load L3 Rules CSV", callback=self.load_l3_rules_csv, width=200)
+            dpg.add_button(
+                label="Load L3 Rules CSV", callback=self.load_l3_rules_csv, width=200
+            )
             dpg.add_spacer(height=10)
 
             if self.l3_rules:
@@ -878,7 +914,6 @@ class GUI:
                     dpg.add_table_column(label="Destination CIDR", width=150)
                     dpg.add_table_column(label="Source Port", width=150)
                     dpg.add_table_column(label="Source CIDR", width=150)
-                    dpg.add_table_column(label="Syslog Enabled", width=100)
 
                     for rule in self.l3_rules:
                         with dpg.table_row():
@@ -888,16 +923,25 @@ class GUI:
                             dpg.add_text(rule["destCidr"])
                             dpg.add_text(rule["srcPort"])
                             dpg.add_text(rule["srcCidr"])
-                            dpg.add_text(str(rule["syslogEnabled"]))
 
                 dpg.add_spacer(height=20)
-                dpg.add_button(label="Select Target Networks", callback=lambda: self.show_network_selection("Select Target Networks for L3 Rules", True), width=200)
+                dpg.add_button(
+                    label="Select Target Networks",
+                    callback=lambda: self.show_network_selection(
+                        "Select Target Networks for L3 Rules", True
+                    ),
+                    width=200,
+                )
 
                 if self.selected_targets:
                     dpg.add_spacer(height=10)
                     dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
                     dpg.add_spacer(width=10)
-                    dpg.add_button(label="Deploy L3 Rules", callback=self.deploy_l3_rules, width=200)
+                    dpg.add_button(
+                        label="Deploy L3 Rules",
+                        callback=self.deploy_l3_rules,
+                        width=200,
+                    )
 
     def load_l3_rules_csv(self):
         with dpg.file_dialog(
@@ -909,11 +953,13 @@ class GUI:
             modal=True,
             default_path=".",
             file_count=1,
-            tag="l3_rules_file_dialog"  # Assign a unique tag to the file dialog
+            tag="l3_rules_file_dialog",  # Assign a unique tag to the file dialog
         ):
             dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
 
-        dpg.show_item("l3_rules_file_dialog")  # Show the file dialog using its unique tag
+        dpg.show_item(
+            "l3_rules_file_dialog"
+        )  # Show the file dialog using its unique tag
 
     def handle_l3_rules_csv_load(self, sender, app_data):
         if app_data["file_path_name"]:
@@ -940,7 +986,8 @@ class GUI:
                 success_count += 1
 
         self.show_status(
-            f"L3 rules deployment complete: {success_count}/{total} successful", duration=5000
+            f"L3 rules deployment complete: {success_count}/{total} successful",
+            duration=5000,
         )
 
     def run(self):
