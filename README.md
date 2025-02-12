@@ -2,12 +2,26 @@
 
 A modern cross-platform GUI tool for security, deployment & auditing of Cisco Meraki appliances.
 
+![alt text](preview.png)
+
+## Install
+```
+git clone https://github.com/summoningshells/mirage.git
+cd mirage
+python -m venv venv
+source venv/bin/avtivate
+pip install meraki dearpygui
+python3 mirage.py
+```
+
+
+
 ## Features
 - Modern, simple, cross-platform GUI interface (Windows, macOS, Linux)
 - Deploy changes to MX appliances across different networks simultaneously:
     - L7 Firewall rules
-    - L3 Firewall rules (Coming SOon)
-    - Content Filtering(CommingSoon)
+    - L3 Firewall rules from csv
+    - Content Filtering(Comming Soon)
 - Security Auditing capabilities:
     - Extract all public IPs from all your appliances across all networks (even when using multiple WAN's)
     - Lookup IPs via Censys or Shodan to identify exposed ports and assets
