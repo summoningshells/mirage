@@ -27,7 +27,7 @@ python3 mirage.py
     - Lookup IPs via Censys or Shodan to identify exposed ports and assets
     - Check IDS (Intrusion Prevention System) status and configuration across all appliances
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
-    - Check Unescure Port Forwarding configs
+    - Check Unescure Port Forwarding configs 
 
 
 ## Security Features & Phylosophy
@@ -47,7 +47,7 @@ Contributions are welcome! Please feel free to submit pull requests. i am not a 
 
 
 ## Limitations
-- Works only for a single organisation since its my use-case and the multi organisations api operations are hell D: (rate limits are too strong)
+- Works only for a single organisation since its my use-case and the multi organisations api operations are too restricted API wise
 - inputing the api every time you use the app can be a bit cumbersome
 
 ## License
