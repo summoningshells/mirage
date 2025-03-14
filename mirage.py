@@ -354,11 +354,11 @@ class GUI:
         self.network_filter: str = ""
         self.sort_ascending: bool = True
         self.l3_rules: List[Dict] = []
+        self.current_view: str = ""
 
     def setup_gui(self):
         dpg.create_context()
 
-        # authentication
         with dpg.window(
             label="Meraki Authentication",
             tag="auth_window",
@@ -375,9 +375,8 @@ class GUI:
             )
             dpg.add_button(label="Connect", callback=self.authenticate)
 
-        # main Window
         with dpg.window(
-            label="Mirage - V0.1 (i despise rate limits)",
+            label="Mirage - V0.1",
             tag="main_window",
             show=False,
             no_resize=True,
@@ -392,7 +391,6 @@ class GUI:
                         label="Refresh Networks", callback=self.refresh_networks
                     )
 
-            # sidebar menu
             with dpg.group(horizontal=True):
                 with dpg.child_window(width=200, border=False):
                     with dpg.collapsing_header(label="Deployment", default_open=True):
@@ -408,7 +406,6 @@ class GUI:
                             callback=self.show_public_ips_content,
                             width=-1,
                         )
-                        dpg.add_button(label="Attack Surface", width=-1)
                         dpg.add_button(
                             label="IPS/IPS Status",
                             callback=self.show_ids_ips_status,
@@ -423,11 +420,9 @@ class GUI:
                             width=-1,
                         )
 
-                # main content area - fills remaining space
                 with dpg.child_window(tag="content_window", border=False):
                     pass
 
-        # status window for notifications
         with dpg.window(
             label="Status",
             tag="status_window",
@@ -439,92 +434,66 @@ class GUI:
             dpg.add_text(tag="status_text")
 
     def show_network_selection(self, title: str, multi_select: bool = False):
+        self.current_view = f"network_selection_{title}_{multi_select}"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            # header
             with dpg.group(horizontal=True):
                 dpg.add_text(title, color=(255, 255, 0))
-                dpg.add_spacer(width=20)
+                dpg.add_input_text(
+                    label="Search",
+                    tag="network_filter",
+                    callback=lambda s, a: self.handle_filter_input(a, multi_select),
+                    on_enter=True,
+                    default_value=self.network_filter,
+                    width=200,
+                )
+                dpg.add_button(
+                    label="Sort (A-Z)" if self.sort_ascending else "Sort (Z-A)",
+                    callback=lambda: self.toggle_sort(multi_select),
+                )
 
-                # search n sort controls
-                with dpg.group(horizontal=True):
-                    dpg.add_input_text(
-                        label="Search",
-                        tag="network_filter",
-                        callback=lambda s, a: self.handle_filter_input(a, multi_select),
-                        on_enter=True,
-                        default_value=self.network_filter,
-                        width=200,
-                    )
-                    dpg.add_button(
-                        label="Sort (A-Z)" if self.sort_ascending else "Sort (Z-A)",
-                        callback=lambda: self.toggle_sort(title, multi_select),
-                    )
-
-            dpg.add_spacer(height=5)
-
-            # controls for multi-select mode
             if multi_select:
                 with dpg.group(horizontal=True):
                     dpg.add_button(
-                        label="Select All", callback=self.select_all_networks
+                        label="Select All", callback=lambda: self.select_all_networks(multi_select)
                     )
-                    dpg.add_spacer(width=5)
                     dpg.add_button(
-                        label="Clear Selection", callback=self.clear_selection
+                        label="Clear Selection", callback=lambda: self.clear_selection(multi_select)
                     )
-
-            dpg.add_spacer(height=10)
 
             dpg.add_table(
                 header_row=True,
                 borders_innerH=True,
                 borders_outerH=True,
-                borders_innerV=True,
-                borders_outerV=True,
-                row_background=True,
                 tag="networks_table",
-                user_data=multi_select,
             )
 
-            dpg.add_table_column(
-                label="Network Name",
-                width_fixed=True,
-                init_width_or_weight=400,
-                parent="networks_table",
-            )
-            dpg.add_table_column(
-                label="Select",
-                width_fixed=True,
-                init_width_or_weight=100,
-                parent="networks_table",
-            )
+            dpg.add_table_column(label="Network Name", width=400, parent="networks_table")
+            dpg.add_table_column(label="Select", width=100, parent="networks_table")
 
             self.update_network_table(multi_select)
 
-            dpg.add_spacer(height=20)
-
-            # footer
             if multi_select:
                 with dpg.group(horizontal=True):
-                    dpg.add_text(f"Selected Networks: {len(self.selected_targets)}")
-                    dpg.add_spacer(width=20)
+                    dpg.add_text(f"Selected: {len(self.selected_targets)}")
                     dpg.add_button(
                         label="Done",
-                        callback=lambda: self.show_l7_deployment_interface(),
+                        callback=self.handle_multi_select_done,
                         width=100,
                     )
 
+    def handle_multi_select_done(self):
+        if "L3" in self.current_view:
+            self.show_l3_rules()
+        else:
+            self.show_l7_deployment_interface()
+
     def handle_filter_input(self, app_data: str, multi_select: bool):
-        """filter input while maintaining focus."""
         self.network_filter = app_data
         self.update_network_table(multi_select)
-        dpg.focus_item("network_filter")
 
     def update_network_table(self, multi_select: bool):
-        """update network table based on current filter."""
-        # clear existing rows while preserving header
         for child in dpg.get_item_children("networks_table", slot=1):
             dpg.delete_item(child)
 
@@ -539,7 +508,6 @@ class GUI:
                 with dpg.table_row(parent="networks_table"):
                     dpg.add_text(network["name"])
                     if multi_select:
-                        # unique tag for each checkbox
                         checkbox_tag = f"checkbox_{network['id']}"
                         dpg.add_checkbox(
                             tag=checkbox_tag,
@@ -555,6 +523,7 @@ class GUI:
                         )
 
     def show_l7_deployment_interface(self):
+        self.current_view = "l7_deployment"
         if not self.selected_baseline:
             self.show_status("No baseline network selected!")
             self.show_network_selection("Select Baseline Network", False)
@@ -563,50 +532,33 @@ class GUI:
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            # header
             with dpg.group(horizontal=True):
                 dpg.add_text("Baseline Network:", color=(255, 255, 0))
                 dpg.add_text(self.get_network_name(self.selected_baseline))
 
-            # show current L7 rules
-            dpg.add_spacer(height=10)
             dpg.add_text("Current L7 Rules:", color=(255, 255, 0))
-            dpg.add_spacer(height=5)
-
+            
             rules = self.meraki.get_l7_rules(self.selected_baseline)
 
             if rules:
-                with dpg.table(
-                    header_row=True,
-                    borders_innerH=True,
-                    borders_outerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                ):
+                with dpg.table(header_row=True, borders_innerH=True, borders_outerH=True):
                     dpg.add_table_column(label="Policy", width=100)
                     dpg.add_table_column(label="Type", width=100)
                     dpg.add_table_column(label="Value", width=200)
 
                     for rule in rules:
                         with dpg.table_row():
-                            policy_color = (
-                                (255, 100, 100)
-                                if rule["policy"] == "deny"
-                                else (100, 255, 100)
-                            )
+                            policy_color = (255, 100, 100) if rule["policy"] == "deny" else (100, 255, 100)
                             dpg.add_text(rule["policy"], color=policy_color)
                             dpg.add_text(rule["type"])
                             dpg.add_text(rule["value"])
             else:
                 dpg.add_text("No rules configured", color=(255, 255, 0))
 
-            # controls section
-            dpg.add_spacer(height=20)
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Change Baseline", callback=self.reset_baseline, width=150
                 )
-                dpg.add_spacer(width=10)
                 dpg.add_button(
                     label="Select Targets",
                     callback=lambda: self.show_network_selection(
@@ -615,12 +567,9 @@ class GUI:
                     width=150,
                 )
 
-            # deploy section
             if self.selected_targets:
-                dpg.add_spacer(height=10)
                 with dpg.group(horizontal=True):
                     dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
-                    dpg.add_spacer(width=10)
                     dpg.add_button(
                         label="Deploy Config", callback=self.deploy_config, width=150
                     )
@@ -645,13 +594,9 @@ class GUI:
         dpg.split_frame(delay=duration)
         dpg.configure_item("status_window", show=False)
 
-    def update_network_list(self, title: str, multi_select: bool):
-        self.network_filter = dpg.get_value("network_filter")
-        self.show_network_selection(title, multi_select)
-
-    def toggle_sort(self, title: str, multi_select: bool):
+    def toggle_sort(self, multi_select: bool):
         self.sort_ascending = not self.sort_ascending
-        self.show_network_selection(title, multi_select)
+        self.update_network_table(multi_select)
 
     def select_baseline(self, network_data: Dict):
         self.selected_baseline = network_data["id"]
@@ -666,14 +611,22 @@ class GUI:
             self.selected_targets.remove(network_id)
         else:
             self.selected_targets.append(network_id)
+        
+        # Update any selected count text
+        if dpg.does_item_exist("content_window"):
+            for child in dpg.get_item_children("content_window", slot=1):
+                if isinstance(child, list):
+                    for item in child:
+                        if dpg.get_item_type(item) == "mvText" and "Selected" in dpg.get_item_label(item):
+                            dpg.set_value(item, f"Selected: {len(self.selected_targets)}")
 
-    def select_all_networks(self):
+    def select_all_networks(self, multi_select: bool):
         self.selected_targets = [n["id"] for n in self.filter_and_sort_networks()]
-        self.show_network_selection("Select Target Networks", True)
+        self.update_network_table(multi_select)
 
-    def clear_selection(self):
+    def clear_selection(self, multi_select: bool):
         self.selected_targets = []
-        self.show_network_selection("Select Target Networks", True)
+        self.update_network_table(multi_select)
 
     def get_network_name(self, network_id: str) -> str:
         for network in self.meraki.networks:
@@ -697,22 +650,17 @@ class GUI:
             if self.meraki.deploy_l7_rules(target_id):
                 success_count += 1
 
-        self.show_status(
-            f"Deployment complete: {success_count}/{total} successful", duration=5000
-        )
+        self.show_status(f"Deployment complete: {success_count}/{total} successful", duration=5000)
 
     def authenticate(self):
         api_key = dpg.get_value("api_key_input")
-        self.show_status("Authenticating...")
+        self.show_status("Let me cook...")
         if self.meraki.initialize_api(api_key):
             dpg.hide_item("auth_window")
             dpg.show_item("main_window")
-            self.show_status("Let me cook...")
+            self.show_status("Loading networks...")
             self.meraki.get_networks()
-            if self.meraki.networks:
-                self.show_status("Successfully connected!")
-            else:
-                self.show_status("Connected, but no networks found")
+            self.show_status("Connected" if self.meraki.networks else "No networks found")
         else:
             self.show_status("Authentication failed!")
 
@@ -720,23 +668,39 @@ class GUI:
         self.meraki = MerakiManager()
         self.selected_baseline = None
         self.selected_targets = []
+        self.current_view = ""
         dpg.hide_item("main_window")
         dpg.show_item("auth_window")
         dpg.set_value("api_key_input", "")
 
     def refresh_networks(self):
-        self.show_status("Refreshing networks list...")
+        self.show_status("Refreshing networks...")
         networks = self.meraki.get_networks()
         if networks:
             self.show_status("Networks refreshed!")
-            if hasattr(self, "current_view"):
-                # refresh current view if it exists
-                if self.selected_baseline:
-                    self.show_l7_deployment_interface()
+            
+            # Refresh current view
+            if self.current_view == "l7_deployment":
+                self.show_l7_deployment_interface()
+            elif self.current_view.startswith("network_selection"):
+                if "L3" in self.current_view:
+                    self.show_network_selection("Select Target Networks for L3 Rules", True)
+                elif "Target" in self.current_view:
+                    self.show_network_selection("Select Target Networks", True)
                 else:
                     self.show_network_selection("Select Baseline Network", False)
+            elif self.current_view == "l3_rules":
+                self.show_l3_rules()
+            elif self.current_view == "amp_status":
+                self.show_amp_status()
+            elif self.current_view == "ids_ips_status":
+                self.show_ids_ips_status()
+            elif self.current_view == "port_forwarding":
+                self.show_port_forwarding_check()
+            elif self.current_view == "public_ips":
+                self.show_public_ips_content()
         else:
-            self.show_status("Failed to refresh networks (possible rate limit)")
+            self.show_status("Failed to refresh networks")
 
     def show_l7_rules(self):
         if not self.selected_baseline:
@@ -745,14 +709,12 @@ class GUI:
             self.show_l7_deployment_interface()
 
     def show_public_ips_content(self):
-        dpg.delete_item(
-            "content_window", children_only=True
-        )  # clear the central content window
+        self.current_view = "public_ips"
+        dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            dpg.add_text("Public IPs", color=(255, 255, 0), indent=10)
-            dpg.add_spacer(height=10)
-
+            dpg.add_text("Public IPs", color=(255, 255, 0))
+            
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Extract Raw WAN IPs",
@@ -765,8 +727,6 @@ class GUI:
                     width=200,
                 )
 
-            dpg.add_spacer(height=20)
-
     def extract_raw_wan_ips(self):
         self.meraki.generate_raw_wan_ips()
         self.show_status("Raw WAN IPs extracted!")
@@ -776,24 +736,18 @@ class GUI:
         self.show_status("Detailed WAN Info extracted!")
 
     def show_amp_status(self):
+        self.current_view = "amp_status"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            dpg.add_text("AMP Status", color=(255, 255, 0), indent=10)
-            dpg.add_spacer(height=10)
-
+            dpg.add_text("AMP Status", color=(255, 255, 0))
+            
             amp_statuses = self.meraki.check_amp_status()
 
             if not amp_statuses:
                 dpg.add_text("No AMP statuses found", color=(255, 255, 0))
             else:
-                with dpg.table(
-                    header_row=True,
-                    borders_innerH=True,
-                    borders_outerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                ):
+                with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
                     dpg.add_table_column(label="AMP Enabled", width=100)
 
@@ -804,32 +758,22 @@ class GUI:
                             dpg.add_text(network["name"])
                             dpg.add_text(
                                 "Yes" if amp_enabled else "No",
-                                color=(100, 255, 100)
-                                if amp_enabled
-                                else (255, 100, 100),
+                                color=(100, 255, 100) if amp_enabled else (255, 100, 100),
                             )
 
-            dpg.add_spacer(height=20)
-
     def show_ids_ips_status(self):
+        self.current_view = "ids_ips_status"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            dpg.add_text("IDS/IPS Status", color=(255, 255, 0), indent=10)
-            dpg.add_spacer(height=10)
-
+            dpg.add_text("IDS/IPS Status", color=(255, 255, 0))
+            
             ids_ips_statuses = self.meraki.check_ids_ips_status()
 
             if not ids_ips_statuses:
                 dpg.add_text("No IDS/IPS statuses found", color=(255, 255, 0))
             else:
-                with dpg.table(
-                    header_row=True,
-                    borders_innerH=True,
-                    borders_outerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                ):
+                with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
                     dpg.add_table_column(label="Mode", width=100)
                     dpg.add_table_column(label="Ruleset", width=100)
@@ -843,35 +787,23 @@ class GUI:
                             dpg.add_text(network["name"])
                             dpg.add_text(
                                 status["mode"],
-                                color=(100, 255, 100)
-                                if status["mode"] == "prevention"
-                                else (255, 100, 100),
+                                color=(100, 255, 100) if status["mode"] == "prevention" else (255, 100, 100),
                             )
                             dpg.add_text(status["ruleset"])
 
-            dpg.add_spacer(height=20)
-
     def show_port_forwarding_check(self):
+        self.current_view = "port_forwarding"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            dpg.add_text("Port Forwarding Check", color=(255, 255, 0), indent=10)
-            dpg.add_spacer(height=10)
-
+            dpg.add_text("Port Forwarding Check", color=(255, 255, 0))
+            
             insecure_rules = self.meraki.check_port_forwarding_status()
 
             if not any(insecure_rules.values()):
-                dpg.add_text(
-                    "No insecure port forwarding rules found", color=(255, 255, 0)
-                )
+                dpg.add_text("No insecure port forwarding rules found", color=(255, 255, 0))
             else:
-                with dpg.table(
-                    header_row=True,
-                    borders_innerH=True,
-                    borders_outerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                ):
+                with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
                     dpg.add_table_column(label="Insecure Rules", width=400)
 
@@ -883,37 +815,27 @@ class GUI:
                                 dpg.add_text(network["name"])
                                 dpg.add_text(str(rules), wrap=400)
 
-            dpg.add_spacer(height=20)
-
     def show_l3_rules(self):
+        self.current_view = "l3_rules"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
-            dpg.add_text("L3 Rules Deployment", color=(255, 255, 0), indent=10)
-            dpg.add_spacer(height=10)
-
+            dpg.add_text("L3 Rules Deployment", color=(255, 255, 0))
+            
             dpg.add_button(
                 label="Load L3 Rules CSV", callback=self.load_l3_rules_csv, width=200
             )
-            dpg.add_spacer(height=10)
 
             if self.l3_rules:
                 dpg.add_text("Loaded L3 Rules:", color=(255, 255, 0))
-                dpg.add_spacer(height=5)
-
-                with dpg.table(
-                    header_row=True,
-                    borders_innerH=True,
-                    borders_outerH=True,
-                    borders_innerV=True,
-                    borders_outerV=True,
-                ):
+                
+                with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Policy", width=100)
                     dpg.add_table_column(label="Protocol", width=100)
-                    dpg.add_table_column(label="Destination Port", width=150)
-                    dpg.add_table_column(label="Destination CIDR", width=150)
-                    dpg.add_table_column(label="Source Port", width=150)
-                    dpg.add_table_column(label="Source CIDR", width=150)
+                    dpg.add_table_column(label="Dest Port", width=120)
+                    dpg.add_table_column(label="Dest CIDR", width=120)
+                    dpg.add_table_column(label="Src Port", width=120)
+                    dpg.add_table_column(label="Src CIDR", width=120)
 
                     for rule in self.l3_rules:
                         with dpg.table_row():
@@ -924,7 +846,6 @@ class GUI:
                             dpg.add_text(rule["srcPort"])
                             dpg.add_text(rule["srcCidr"])
 
-                dpg.add_spacer(height=20)
                 dpg.add_button(
                     label="Select Target Networks",
                     callback=lambda: self.show_network_selection(
@@ -934,9 +855,7 @@ class GUI:
                 )
 
                 if self.selected_targets:
-                    dpg.add_spacer(height=10)
                     dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
-                    dpg.add_spacer(width=10)
                     dpg.add_button(
                         label="Deploy L3 Rules",
                         callback=self.deploy_l3_rules,
@@ -949,25 +868,19 @@ class GUI:
             width=600,
             height=400,
             callback=self.handle_l3_rules_csv_load,
-            show=False,
+            show=True,
             modal=True,
             default_path=".",
             file_count=1,
-            tag="l3_rules_file_dialog",  # Assign a unique tag to the file dialog
+            tag="l3_rules_file_dialog",
         ):
             dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
-
-        dpg.show_item(
-            "l3_rules_file_dialog"
-        )  # Show the file dialog using its unique tag
 
     def handle_l3_rules_csv_load(self, sender, app_data):
         if app_data["file_path_name"]:
             file_path = app_data["file_path_name"]
             self.l3_rules = self.meraki.parse_l3_rules_csv(file_path)
             self.show_l3_rules()
-        else:
-            self.show_status("No file selected.")
 
     def deploy_l3_rules(self):
         if not self.selected_targets:
@@ -980,15 +893,12 @@ class GUI:
 
         for idx, target_id in enumerate(self.selected_targets, 1):
             network_name = self.get_network_name(target_id)
-            self.show_status(f"Deploying L3 rules to {network_name} ({idx}/{total})")
+            self.show_status(f"Deploying to {network_name} ({idx}/{total})")
 
             if self.meraki.deploy_l3_rules(target_id, self.l3_rules):
                 success_count += 1
 
-        self.show_status(
-            f"L3 rules deployment complete: {success_count}/{total} successful",
-            duration=5000,
-        )
+        self.show_status(f"Deployment complete: {success_count}/{total} successful")
 
     def run(self):
         viewport_width = 1024
@@ -998,8 +908,6 @@ class GUI:
             title="Mirage", width=viewport_width, height=viewport_height
         )
         dpg.set_viewport_resize_callback(self.resize_windows)
-
-        # initial window positions and sizes
         self.resize_windows(None, [viewport_width, viewport_height])
 
         dpg.setup_dearpygui()
@@ -1011,7 +919,6 @@ class GUI:
         viewport_width = dpg.get_viewport_width()
         viewport_height = dpg.get_viewport_height()
 
-        #  authentication window
         auth_width = 400
         auth_height = 150
         dpg.configure_item(
@@ -1024,18 +931,15 @@ class GUI:
             ],
         )
 
-        #  main window to fill viewport
         dpg.configure_item(
             "main_window", width=viewport_width, height=viewport_height, pos=[0, 0]
         )
 
-        # content window to fill available space
-        content_width = viewport_width - 200  # Subtract sidebar width
+        content_width = viewport_width - 200
         dpg.configure_item(
             "content_window", width=content_width, height=viewport_height - 50
-        )  # Subtract menu bar height
+        )
 
-        # status window
         if dpg.is_item_shown("status_window"):
             status_width = 300
             status_height = 100
