@@ -1,6 +1,6 @@
 # M.I.R.A.G.E: Meraki Infrastructure Rapid Automation and Governance Engine
 
-A modern cross-platform GUI tool for security, deployment & auditing of Cisco Meraki appliances.
+A simple cross-platform GUI tool for security, deployment & auditing of Cisco Meraki MX appliances.
 
 ![alt text](preview.png)
 
@@ -24,7 +24,7 @@ python3 mirage.py
     - Content Filtering(Comming Soon)
 - Security Auditing capabilities:
     - Extract all public IPs from all your appliances across all networks (even when using multiple WAN's)
-    - Lookup IPs via Censys or Shodan to identify exposed ports and assets
+    - Lookup IPs via Censys or Shodan to identify exposed ports and assets (comming soon)
     - Check IDS (Intrusion Prevention System) status and configuration across all appliances
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
     - Check Unescure Port Forwarding configs 
