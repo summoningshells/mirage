@@ -21,13 +21,13 @@ python3 mirage.py
 - Deploy changes to MX appliances across different networks simultaneously:
     - L7 Firewall rules
     - L3 Firewall rules from csv
-    - Content Filtering(Comming Soon)
+    - Content Filtering(Coming Soon)
 - Security Auditing capabilities:
     - Extract all public IPs from all your appliances across all networks (even when using multiple WAN's)
-    - Lookup IPs via Censys or Shodan to identify exposed ports and assets (comming soon)
+    - Lookup IPs via Censys or Shodan to identify exposed ports and assets (Coming Soon)
     - Check IDS (Intrusion Prevention System) status and configuration across all appliances
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
-    - Check Unescure Port Forwarding configs 
+    - Check Unsecure Port Forwarding configs 
 
 
 ## Security Features & Phylosophy
