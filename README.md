@@ -1,10 +1,13 @@
 # M.I.R.A.G.E: Meraki Infrastructure Rapid Automation and Governance Engine
+![alt text](logo.png)
 
 A simple cross-platform GUI tool for security, deployment & auditing of Cisco Meraki MX appliances.
 
 ![alt text](preview.png)
 
-## Install
+## Install in virtual env
+
+### Linux/Unix/Mac OS
 ```
 git clone https://github.com/summoningshells/mirage.git
 cd mirage
@@ -13,11 +16,19 @@ source venv/bin/avtivate
 pip install meraki dearpygui
 python3 mirage.py
 ```
-
+### Windows
+```
+git clone https://github.com/summoningshells/mirage.git
+cd mirage
+python -m venv venv
+venv\Scripts\activate
+pip install meraki dearpygui
+python3 mirage.py
+```
 
 
 ## Features
-- Modern, simple, cross-platform GUI interface (Windows, macOS, Linux)
+- Minimalist, simple, cross-platform GUI interface (Windows, macOS, Linux)
 - Deploy changes to MX appliances across different networks simultaneously:
     - L7 Firewall rules
     - L3 Firewall rules from csv
