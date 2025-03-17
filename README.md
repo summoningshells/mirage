@@ -1,7 +1,8 @@
 # M.I.R.A.G.E: Meraki Infrastructure Rapid Automation and Governance Engine
+A simple cross-platform GUI tool for security, deployment & auditing of Cisco Meraki MX appliances.
+
 ![alt text](logo.png)
 
-A simple cross-platform GUI tool for security, deployment & auditing of Cisco Meraki MX appliances.
 
 ![alt text](preview.png)
 
