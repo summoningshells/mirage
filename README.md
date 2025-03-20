@@ -43,6 +43,7 @@ python3 mirage.py
     - Check IDS (Intrusion Prevention System) status and configuration across all appliances
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
     - Check Unsecure Port Forwarding configs 
+
 ![alt text](assets/preview.png)
 
 # Security Features & Philosophy
