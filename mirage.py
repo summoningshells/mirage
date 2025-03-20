@@ -12,30 +12,24 @@ class RateLimiter:
         self.tokens = requests_per_second
         self.last_refill = datetime.now()
 
+# rate limit handler for meraki api requests, refer to the official docs for excat rates based on the operations u want to make
     def wait_if_needed(self):
         now = datetime.now()
         time_since_last = (now - self.last_refill).total_seconds()
-
-        # refill tokens based on time passed
         if time_since_last > 1:
             self.tokens = self.requests_per_second
             self.last_refill = now
         else:
             self.tokens += time_since_last * self.requests_per_second
-
-        # ensure tokens do not exceed the bucket size
         self.tokens = min(self.tokens, self.requests_per_second)
-
-        # wait if no tokens available
         if self.tokens < 1:
             sleep_time = 1 - time_since_last
             time.sleep(sleep_time)
             self.tokens = 1
-
         self.tokens -= 1
         self.last_request = datetime.now()
 
-
+# The "Brains of the tool" , it handles all requests, conversion, etc
 class MerakiManager:
     def __init__(self):
         self.dashboard: Optional[meraki.DashboardAPI] = None
@@ -43,7 +37,7 @@ class MerakiManager:
         self.networks: List[Dict] = []
         self.baseline_rules: List[Dict] = []
         self.rate_limiter = RateLimiter()
-        self.log_callback = None  # Callback function to send logs to GUI
+        self.log_callback = None  # callback function to send logs to GUI
 
     def initialize_api(self, api_key: str) -> bool:
         try:
@@ -54,8 +48,10 @@ class MerakiManager:
                 retry_4xx_error=True,
                 retry_4xx_error_wait_time=15,
                 maximum_retries=3,
+                suppress_logging=False,
+                output_log=False,      # enable to generate a .log file for all api resuests of each session
             )
-            # get first organization (single org use case sorry)
+            # get first organization (single org use case only sorry)
             orgs = self.dashboard.organizations.getOrganizations()
             if not orgs:
                 raise Exception("No organizations found D:")
@@ -70,7 +66,7 @@ class MerakiManager:
         self.log_callback = callback
 
     def log(self, message):
-        """Log a message to the GUI console"""
+        """Log msg to GUI console"""
         if self.log_callback:
             self.log_callback(message)
         else:
@@ -201,8 +197,7 @@ class MerakiManager:
             self.log(f"Error fetching uplink statuses: {e}")
             return []
 
-    def generate_raw_wan_ips(self):
-        """Generate txt file with all WAN IPs."""
+    def generate_raw_wan_ips(self, output_file=None):
         self.log("Generating raw WAN IPs list...")
         statuses = self.fetch_uplink_statuses()
         public_ips = {
@@ -211,17 +206,20 @@ class MerakiManager:
             for uplink in status.get("uplinks", [])
             if uplink.get("publicIp")
         }
+        sorted_ips = sorted(public_ips)
+        content = "\n".join(sorted_ips)
+        if output_file:
+            with open(output_file, "w") as f:
+                f.write(content)
+            self.log(f"WAN IPs saved to {output_file} ({len(public_ips)} IPs)")
+        else:
+            self.log(f"Generated WAN IPs list with {len(public_ips)} IPs")
+            
+        return sorted_ips, content
 
-        with open("wan_ips.txt", "w") as f:
-            for ip in sorted(public_ips):
-                f.write(ip + "\n")
-        self.log(f"WAN IPs saved to wan_ips.txt ({len(public_ips)} IPs)")
-
-    def generate_detailed_wan_info(self):
-        """Generate CSV file with WAN uplink info."""
+    def generate_detailed_wan_info(self, output_file=None):
         self.log("Generating detailed WAN information...")
         statuses = self.fetch_uplink_statuses()
-        output_file = "wan_ips_detailed.csv"
 
         field_names = [
             "name",
@@ -239,43 +237,59 @@ class MerakiManager:
             "wan2_publicIp",
         ]
 
-        with open(output_file, mode="w", newline="\n") as fp:
-            csv_writer = csv.DictWriter(
-                fp, field_names, delimiter=",", quotechar='"', quoting=csv.QUOTE_ALL
-            )
-            csv_writer.writeheader()
-            for status in statuses:
-                record = {
-                    "name": status.get("name"),
-                    "serial": status.get("serial"),
-                    "model": status.get("model"),
-                    "network": status.get("network"),
-                    "networkId": status.get("networkId"),
-                }
+        records = []
+        for status in statuses:
+            record = {
+                "name": status.get("name"),
+                "serial": status.get("serial"),
+                "model": status.get("model"),
+                "network": status.get("network"),
+                "networkId": status.get("networkId"),
+            }
 
-                # WAN1 and WAN2 data
-                for uplink in status.get("uplinks", []):
-                    if uplink.get("interface") == "wan1":
-                        record.update(
-                            {
-                                "wan1_status": uplink.get("status"),
-                                "wan1_ip": uplink.get("ip"),
-                                "wan1_gateway": uplink.get("gateway"),
-                                "wan1_publicIp": uplink.get("publicIp"),
-                            }
-                        )
-                    elif uplink.get("interface") == "wan2":
-                        record.update(
-                            {
-                                "wan2_status": uplink.get("status"),
-                                "wan2_ip": uplink.get("ip"),
-                                "wan2_gateway": uplink.get("gateway"),
-                                "wan2_publicIp": uplink.get("publicIp"),
-                            }
-                        )
-
-                csv_writer.writerow(record)
-        self.log(f"Detailed WAN IPs saved to {output_file} ({len(statuses)} devices)")
+            # WAN1 and WAN2 data
+            for uplink in status.get("uplinks", []):
+                if uplink.get("interface") == "wan1":
+                    record.update(
+                        {
+                            "wan1_status": uplink.get("status"),
+                            "wan1_ip": uplink.get("ip"),
+                            "wan1_gateway": uplink.get("gateway"),
+                            "wan1_publicIp": uplink.get("publicIp"),
+                        }
+                    )
+                elif uplink.get("interface") == "wan2":
+                    record.update(
+                        {
+                            "wan2_status": uplink.get("status"),
+                            "wan2_ip": uplink.get("ip"),
+                            "wan2_gateway": uplink.get("gateway"),
+                            "wan2_publicIp": uplink.get("publicIp"),
+                        }
+                    )
+            
+            records.append(record)
+        
+        # Generate CSV content as string
+        import io
+        csv_buffer = io.StringIO()
+        csv_writer = csv.DictWriter(
+            csv_buffer, field_names, delimiter=",", quotechar='"', quoting=csv.QUOTE_ALL
+        )
+        csv_writer.writeheader()
+        for record in records:
+            csv_writer.writerow(record)
+        
+        csv_content = csv_buffer.getvalue()
+        
+        if output_file:
+            with open(output_file, mode="w", newline="\n") as fp:
+                fp.write(csv_content)
+            self.log(f"Detailed WAN IPs saved to {output_file} ({len(statuses)} devices)")
+        else:
+            self.log(f"Generated detailed WAN information for {len(statuses)} devices")
+            
+        return records, csv_content
 
     def check_amp_status(self) -> Dict[str, bool]:
         self.log("Checking AMP status for all networks...")
@@ -429,7 +443,7 @@ class GUI:
             dpg.add_button(label="Connect", callback=self.authenticate)
 
         with dpg.window(
-            label="Mirage - V0.1",
+            label="Mirage - V0.2",
             tag="main_window",
             show=False,
             no_resize=True,
@@ -731,7 +745,7 @@ class GUI:
         api_key = dpg.get_value("api_key_input")
         self.show_status("Let me cook...")
         
-        # Set up the logging callback before API initialization
+        # Set logging callback before API initialization
         self.meraki.set_log_callback(self.add_log)
         
         if self.meraki.initialize_api(api_key):
@@ -747,7 +761,7 @@ class GUI:
     def logout(self):
         self.meraki = MerakiManager()
         self.meraki.set_log_callback(self.add_log)
-        self.add_log("Logged out")
+        self.add_log("Logged out, Bye Bye bosssman")
         self.selected_baseline = None
         self.selected_targets = []
         self.current_view = ""
@@ -814,15 +828,69 @@ class GUI:
 
     def extract_raw_wan_ips(self):
         self.add_log("Starting extraction of raw WAN IPs...")
-        self.meraki.generate_raw_wan_ips()
-        self.show_status("Raw WAN IPs extracted!")
-        self.add_log("Raw WAN IPs extraction completed")
+        ips, content = self.meraki.generate_raw_wan_ips()
+        
+        if not ips:
+            self.show_status("No WAN IPs found!")
+            return
+            
+        with dpg.file_dialog(
+            label="Save WAN IPs",
+            width=600,
+            height=400,
+            callback=lambda s, a: self.save_raw_wan_ips(a, content),
+            show=True,
+            modal=True,
+            default_path=".",
+            default_filename="wan_ips.txt",
+            file_count=0,  # This is for saving, not opening
+            tag="save_raw_ips_dialog",
+            directory_selector=False,
+        ):
+            dpg.add_file_extension(".txt", color=(0, 255, 0, 255))
+    
+    def save_raw_wan_ips(self, app_data, content):
+        if app_data["file_path_name"]:
+            file_path = app_data["file_path_name"]
+            with open(file_path, "w") as f:
+                f.write(content)
+            self.show_status(f"Raw WAN IPs saved to {file_path}!")
+            self.add_log(f"Raw WAN IPs saved to {file_path}")
+        else:
+            self.add_log("Raw WAN IPs save cancelled")
 
     def extract_detailed_wan_info(self):
         self.add_log("Starting extraction of detailed WAN information...")
-        self.meraki.generate_detailed_wan_info()
-        self.show_status("Detailed WAN Info extracted!")
-        self.add_log("Detailed WAN information extraction completed")
+        records, csv_content = self.meraki.generate_detailed_wan_info()
+        
+        if not records:
+            self.show_status("No WAN information found!")
+            return
+            
+        with dpg.file_dialog(
+            label="Save Detailed WAN Info",
+            width=600,
+            height=400,
+            callback=lambda s, a: self.save_detailed_wan_info(a, csv_content),
+            show=True,
+            modal=True,
+            default_path=".",
+            default_filename="wan_ips_detailed.csv",
+            file_count=0,  # This is for saving, not opening
+            tag="save_detailed_wan_dialog",
+            directory_selector=False,
+        ):
+            dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
+    
+    def save_detailed_wan_info(self, app_data, content):
+        if app_data["file_path_name"]:
+            file_path = app_data["file_path_name"]
+            with open(file_path, "w", newline="\n") as f:
+                f.write(content)
+            self.show_status(f"Detailed WAN info saved to {file_path}!")
+            self.add_log(f"Detailed WAN information saved to {file_path}")
+        else:
+            self.add_log("Detailed WAN information save cancelled")
 
     def show_amp_status(self):
         self.current_view = "amp_status"
