@@ -4,8 +4,6 @@ from typing import Optional, List, Dict
 import time
 from datetime import datetime
 import csv
-import json
-
 
 class RateLimiter:
     def __init__(self, requests_per_second: int = 10):
@@ -45,6 +43,7 @@ class MerakiManager:
         self.networks: List[Dict] = []
         self.baseline_rules: List[Dict] = []
         self.rate_limiter = RateLimiter()
+        self.log_callback = None  # Callback function to send logs to GUI
 
     def initialize_api(self, api_key: str) -> bool:
         try:
@@ -63,8 +62,19 @@ class MerakiManager:
             self.organization_id = orgs[0]["id"]
             return True
         except Exception as e:
-            print(f"API initialization failed: {e}")
+            self.log(f"API initialization failed: {e}")
             return False
+
+    def set_log_callback(self, callback):
+        """Set callback function to handle logs in GUI"""
+        self.log_callback = callback
+
+    def log(self, message):
+        """Log a message to the GUI console"""
+        if self.log_callback:
+            self.log_callback(message)
+        else:
+            print(message)  # Fallback if GUI not initialized
 
     def log_api_call(
         self, method: str, endpoint: str, status_code: int, response_time: float
@@ -76,9 +86,8 @@ class MerakiManager:
             "status_code": status_code,
             "response_time": response_time,
         }
-        # log to file for debug(mostlikely too much api usage)
-        with open("api_log.txt", "a") as log_file:
-            log_file.write(json.dumps(log_entry) + "\n")
+        # Log to GUI console
+        self.log(f"API Call: {method} {endpoint} - Status: {status_code} - Time: {response_time:.2f}s")
 
     def get_configuration_changes(self, timespan: int = 3600) -> List[Dict]:
         try:
@@ -88,7 +97,7 @@ class MerakiManager:
             )
             return changes
         except Exception as e:
-            print(f"Error fetching configuration changes: {e}")
+            self.log(f"Error fetching configuration changes: {e}")
             return []
 
     def get_networks(self) -> List[Dict]:
@@ -99,7 +108,7 @@ class MerakiManager:
             )
             return self.networks
         except Exception as e:
-            print(f"Error fetching networks: {e}")
+            self.log(f"Error fetching networks: {e}")
             return []
 
     def get_devices(self) -> List[Dict]:
@@ -110,7 +119,7 @@ class MerakiManager:
             )
             return devices
         except Exception as e:
-            print(f"Error fetching devices: {e}")
+            self.log(f"Error fetching devices: {e}")
             return []
 
     def create_action_batch(
@@ -126,7 +135,7 @@ class MerakiManager:
             )
             return response
         except Exception as e:
-            print(f"Error creating action batch: {e}")
+            self.log(f"Error creating action batch: {e}")
             return {}
 
     def get_l7_rules(self, network_id: str) -> List[Dict]:
@@ -141,7 +150,7 @@ class MerakiManager:
             self.baseline_rules = rules
             return rules
         except Exception as e:
-            print(f"Error fetching L7 rules: {e}")
+            self.log(f"Error fetching L7 rules: {e}")
             return []
 
     def deploy_l7_rules(self, target_network_id: str) -> bool:
@@ -153,22 +162,26 @@ class MerakiManager:
             self.dashboard.appliance.updateNetworkApplianceFirewallL7FirewallRules(
                 target_network_id, rules=self.baseline_rules
             )
+            self.log(f"Successfully deployed L7 rules to network {target_network_id}")
             return True
         except Exception as e:
-            print(f"Error deploying L7 rules to network {target_network_id}: {e}")
+            self.log(f"Error deploying L7 rules to network {target_network_id}: {e}")
             return False
 
     def fetch_uplink_statuses(self) -> list:
         try:
             self.rate_limiter.wait_if_needed()
+            self.log("Fetching appliance uplink statuses...")
             appliance_statuses = (
                 self.dashboard.appliance.getOrganizationApplianceUplinkStatuses(
                     self.organization_id, total_pages="all"
                 )
             )
+            self.log("Fetching networks...")
             networks = self.dashboard.organizations.getOrganizationNetworks(
                 self.organization_id, total_pages="all"
             )
+            self.log("Fetching device statuses...")
             devices = self.dashboard.organizations.getOrganizationDevicesStatuses(
                 self.organization_id, total_pages="all"
             )
@@ -182,13 +195,15 @@ class MerakiManager:
                 status["name"] = devices_by_serial.get(status["serial"], "Unknown")
                 status["network"] = networks_by_id.get(status["networkId"], "Unknown")
 
+            self.log(f"Successfully fetched {len(appliance_statuses)} appliance statuses")
             return appliance_statuses
         except Exception as e:
-            print(f"Error fetching uplink statuses: {e}")
+            self.log(f"Error fetching uplink statuses: {e}")
             return []
 
     def generate_raw_wan_ips(self):
         """Generate txt file with all WAN IPs."""
+        self.log("Generating raw WAN IPs list...")
         statuses = self.fetch_uplink_statuses()
         public_ips = {
             uplink["publicIp"]
@@ -200,10 +215,11 @@ class MerakiManager:
         with open("wan_ips.txt", "w") as f:
             for ip in sorted(public_ips):
                 f.write(ip + "\n")
-        print("WAN IPs saved to wan_ips.txt")
+        self.log(f"WAN IPs saved to wan_ips.txt ({len(public_ips)} IPs)")
 
     def generate_detailed_wan_info(self):
         """Generate CSV file with WAN uplink info."""
+        self.log("Generating detailed WAN information...")
         statuses = self.fetch_uplink_statuses()
         output_file = "wan_ips_detailed.csv"
 
@@ -259,11 +275,12 @@ class MerakiManager:
                         )
 
                 csv_writer.writerow(record)
-        print("Detailed WAN IPs saved to wan_ips_detailed.csv")
+        self.log(f"Detailed WAN IPs saved to {output_file} ({len(statuses)} devices)")
 
     def check_amp_status(self) -> Dict[str, bool]:
+        self.log("Checking AMP status for all networks...")
         amp_statuses = {}
-        for network in self.networks:
+        for i, network in enumerate(self.networks):
             network_id = network["id"]
             try:
                 self.rate_limiter.wait_if_needed()
@@ -271,14 +288,18 @@ class MerakiManager:
                     network_id
                 )
                 amp_statuses[network_id] = response.get("mode", "disabled") == "enabled"
+                if (i+1) % 10 == 0:
+                    self.log(f"Checked AMP status for {i+1}/{len(self.networks)} networks")
             except Exception as e:
-                print(f"Error fetching AMP status for network {network_id}: {e}")
+                self.log(f"Error fetching AMP status for network {network_id}: {e}")
                 amp_statuses[network_id] = False
+        self.log(f"Completed AMP status check for {len(self.networks)} networks")
         return amp_statuses
 
     def check_ids_ips_status(self) -> Dict[str, Dict]:
+        self.log("Checking IDS/IPS status for all networks...")
         ids_ips_statuses = {}
-        for network in self.networks:
+        for i, network in enumerate(self.networks):
             network_id = network["id"]
             try:
                 self.rate_limiter.wait_if_needed()
@@ -291,14 +312,18 @@ class MerakiManager:
                     "mode": response.get("mode", "disabled"),
                     "ruleset": response.get("idsRulesets", "none"),
                 }
+                if (i+1) % 10 == 0:
+                    self.log(f"Checked IDS/IPS status for {i+1}/{len(self.networks)} networks")
             except Exception as e:
-                print(f"Error fetching IDS/IPS status for network {network_id}: {e}")
+                self.log(f"Error fetching IDS/IPS status for network {network_id}: {e}")
                 ids_ips_statuses[network_id] = {"mode": "error", "ruleset": "error"}
+        self.log(f"Completed IDS/IPS status check for {len(self.networks)} networks")
         return ids_ips_statuses
 
     def check_port_forwarding_status(self) -> Dict[str, List[Dict]]:
+        self.log("Checking port forwarding rules for all networks...")
         insecure_rules = {}
-        for network in self.networks:
+        for i, network in enumerate(self.networks):
             network_id = network["id"]
             try:
                 self.rate_limiter.wait_if_needed()
@@ -309,40 +334,51 @@ class MerakiManager:
                 insecure_rules[network_id] = [
                     rule for rule in rules if "any" in rule.get("allowedIps", [])
                 ]
+                if (i+1) % 10 == 0:
+                    self.log(f"Checked port forwarding rules for {i+1}/{len(self.networks)} networks")
             except Exception as e:
-                print(
+                self.log(
                     f"Error fetching port forwarding rules for network {network_id}: {e}"
                 )
                 insecure_rules[network_id] = []
+        self.log(f"Completed port forwarding check for {len(self.networks)} networks")
         return insecure_rules
 
     def parse_l3_rules_csv(self, file_path: str) -> List[Dict]:
+        self.log(f"Parsing L3 rules from CSV file: {file_path}")
         rules = []
-        with open(file_path, mode="r") as csv_file:
-            csv_reader = csv.DictReader(csv_file)
-            for row in csv_reader:
-                rules.append(
-                    {
-                        "comment": row.get("comment", ""),
-                        "policy": row.get("policy", "allow"),
-                        "protocol": row.get("protocol", "tcp"),
-                        "destPort": row.get("destPort", "Any"),
-                        "destCidr": row.get("destCidr", "Any"),
-                        "srcPort": row.get("srcPort", "Any"),
-                        "srcCidr": row.get("srcCidr", "Any"),
-                    }
-                )
-        return rules
+        try:
+            with open(file_path, mode="r") as csv_file:
+                csv_reader = csv.DictReader(csv_file)
+                for row in csv_reader:
+                    rules.append(
+                        {
+                            "comment": row.get("comment", ""),
+                            "policy": row.get("policy", "allow"),
+                            "protocol": row.get("protocol", "tcp"),
+                            "destPort": row.get("destPort", "Any"),
+                            "destCidr": row.get("destCidr", "Any"),
+                            "srcPort": row.get("srcPort", "Any"),
+                            "srcCidr": row.get("srcCidr", "Any"),
+                        }
+                    )
+            self.log(f"Successfully parsed {len(rules)} L3 rules from CSV")
+            return rules
+        except Exception as e:
+            self.log(f"Error parsing L3 rules CSV: {e}")
+            return []
 
     def deploy_l3_rules(self, target_network_id: str, rules: List[Dict]) -> bool:
         try:
+            self.log(f"Deploying {len(rules)} L3 rules to network {target_network_id}")
             self.rate_limiter.wait_if_needed()
             self.dashboard.appliance.updateNetworkApplianceFirewallCellularFirewallRules(
                 target_network_id, rules=rules
             )
+            self.log(f"Successfully deployed L3 rules to network {target_network_id}")
             return True
         except Exception as e:
-            print(f"Error deploying L3 rules to network {target_network_id}: {e}")
+            self.log(f"Error deploying L3 rules to network {target_network_id}: {e}")
             return False
 
 
@@ -355,6 +391,23 @@ class GUI:
         self.sort_ascending: bool = True
         self.l3_rules: List[Dict] = []
         self.current_view: str = ""
+        self.console_logs: List[str] = []
+        self.max_console_logs = 500  # Maximum number of log entries to keep
+
+    def add_log(self, message: str):
+        """Add a log message to the console"""
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        log_entry = f"[{timestamp}] {message}"
+        self.console_logs.append(log_entry)
+        
+        # Keep only the last max_console_logs entries
+        if len(self.console_logs) > self.max_console_logs:
+            self.console_logs = self.console_logs[-self.max_console_logs:]
+            
+        # Update the console display if it exists
+        if dpg.does_item_exist("console_text"):
+            dpg.set_value("console_text", "\n".join(self.console_logs))
+            dpg.set_y_scroll("console_window", -1.0)  # Auto-scroll to bottom
 
     def setup_gui(self):
         dpg.create_context()
@@ -390,38 +443,49 @@ class GUI:
                     dpg.add_menu_item(
                         label="Refresh Networks", callback=self.refresh_networks
                     )
+                    dpg.add_menu_item(
+                        label="Clear Console", callback=self.clear_console
+                    )
 
-            with dpg.group(horizontal=True):
-                with dpg.child_window(width=200, border=False):
-                    with dpg.collapsing_header(label="Deployment", default_open=True):
-                        dpg.add_button(
-                            label="L7 Rules", callback=self.show_l7_rules, width=-1
-                        )
-                        dpg.add_button(
-                            label="L3 Rules", callback=self.show_l3_rules, width=-1
-                        )
-                    with dpg.collapsing_header(label="Assessment", default_open=True):
-                        dpg.add_button(
-                            label="Public IPs",
-                            callback=self.show_public_ips_content,
-                            width=-1,
-                        )
-                        dpg.add_button(
-                            label="IPS/IPS Status",
-                            callback=self.show_ids_ips_status,
-                            width=-1,
-                        )
-                        dpg.add_button(
-                            label="AMP Status", callback=self.show_amp_status, width=-1
-                        )
-                        dpg.add_button(
-                            label="Port Forwarding Check",
-                            callback=self.show_port_forwarding_check,
-                            width=-1,
-                        )
+            # Main layout with sidebar, content window, and console
+            with dpg.group(horizontal=False):
+                # Top section with sidebar and content
+                with dpg.group(horizontal=True, tag="main_content_group"):
+                    with dpg.child_window(width=200, border=False, tag="sidebar_window"):
+                        with dpg.collapsing_header(label="Deployment", default_open=True):
+                            dpg.add_button(
+                                label="L7 Rules", callback=self.show_l7_rules, width=-1
+                            )
+                            dpg.add_button(
+                                label="L3 Rules", callback=self.show_l3_rules, width=-1
+                            )
+                        with dpg.collapsing_header(label="Assessment", default_open=True):
+                            dpg.add_button(
+                                label="Public IPs",
+                                callback=self.show_public_ips_content,
+                                width=-1,
+                            )
+                            dpg.add_button(
+                                label="IPS/IPS Status",
+                                callback=self.show_ids_ips_status,
+                                width=-1,
+                            )
+                            dpg.add_button(
+                                label="AMP Status", callback=self.show_amp_status, width=-1
+                            )
+                            dpg.add_button(
+                                label="Port Forwarding Check",
+                                callback=self.show_port_forwarding_check,
+                                width=-1,
+                            )
 
-                with dpg.child_window(tag="content_window", border=False):
-                    pass
+                    with dpg.child_window(tag="content_window", border=False):
+                        pass
+                
+                # Console at the bottom
+                with dpg.collapsing_header(label="Console", default_open=True, tag="console_header"):
+                    with dpg.child_window(tag="console_window", height=150, horizontal_scrollbar=True):
+                        dpg.add_text("", tag="console_text", wrap=0)
 
         with dpg.window(
             label="Status",
@@ -432,6 +496,12 @@ class GUI:
             no_move=True,
         ):
             dpg.add_text(tag="status_text")
+    
+    def clear_console(self):
+        """Clear the console log"""
+        self.console_logs = []
+        if dpg.does_item_exist("console_text"):
+            dpg.set_value("console_text", "")
 
     def show_network_selection(self, title: str, multi_select: bool = False):
         self.current_view = f"network_selection_{title}_{multi_select}"
@@ -637,28 +707,38 @@ class GUI:
     def deploy_config(self):
         if not self.selected_targets:
             self.show_status("Please select target networks first")
+            self.add_log("Deployment failed: No target networks selected")
             return
 
         self.show_status("Starting deployment...")
+        self.add_log(f"Starting L7 rules deployment to {len(self.selected_targets)} networks")
         success_count = 0
         total = len(self.selected_targets)
 
         for idx, target_id in enumerate(self.selected_targets, 1):
             network_name = self.get_network_name(target_id)
             self.show_status(f"Deploying to {network_name} ({idx}/{total})")
+            self.add_log(f"Deploying to {network_name} ({idx}/{total})")
 
             if self.meraki.deploy_l7_rules(target_id):
                 success_count += 1
 
-        self.show_status(f"Deployment complete: {success_count}/{total} successful", duration=5000)
+        result_message = f"Deployment complete: {success_count}/{total} successful"
+        self.show_status(result_message, duration=5000)
+        self.add_log(result_message)
 
     def authenticate(self):
         api_key = dpg.get_value("api_key_input")
         self.show_status("Let me cook...")
+        
+        # Set up the logging callback before API initialization
+        self.meraki.set_log_callback(self.add_log)
+        
         if self.meraki.initialize_api(api_key):
             dpg.hide_item("auth_window")
             dpg.show_item("main_window")
             self.show_status("Loading networks...")
+            self.add_log("Authentication successful, loading networks...")
             self.meraki.get_networks()
             self.show_status("Connected" if self.meraki.networks else "No networks found")
         else:
@@ -666,6 +746,8 @@ class GUI:
 
     def logout(self):
         self.meraki = MerakiManager()
+        self.meraki.set_log_callback(self.add_log)
+        self.add_log("Logged out")
         self.selected_baseline = None
         self.selected_targets = []
         self.current_view = ""
@@ -675,9 +757,11 @@ class GUI:
 
     def refresh_networks(self):
         self.show_status("Refreshing networks...")
+        self.add_log("Refreshing networks...")
         networks = self.meraki.get_networks()
         if networks:
             self.show_status("Networks refreshed!")
+            self.add_log(f"Networks refreshed successfully. Found {len(networks)} networks.")
             
             # Refresh current view
             if self.current_view == "l7_deployment":
@@ -701,6 +785,7 @@ class GUI:
                 self.show_public_ips_content()
         else:
             self.show_status("Failed to refresh networks")
+            self.add_log("Failed to refresh networks")
 
     def show_l7_rules(self):
         if not self.selected_baseline:
@@ -728,12 +813,16 @@ class GUI:
                 )
 
     def extract_raw_wan_ips(self):
+        self.add_log("Starting extraction of raw WAN IPs...")
         self.meraki.generate_raw_wan_ips()
         self.show_status("Raw WAN IPs extracted!")
+        self.add_log("Raw WAN IPs extraction completed")
 
     def extract_detailed_wan_info(self):
+        self.add_log("Starting extraction of detailed WAN information...")
         self.meraki.generate_detailed_wan_info()
         self.show_status("Detailed WAN Info extracted!")
+        self.add_log("Detailed WAN information extraction completed")
 
     def show_amp_status(self):
         self.current_view = "amp_status"
@@ -879,26 +968,33 @@ class GUI:
     def handle_l3_rules_csv_load(self, sender, app_data):
         if app_data["file_path_name"]:
             file_path = app_data["file_path_name"]
+            self.add_log(f"Loading L3 rules from CSV file: {file_path}")
             self.l3_rules = self.meraki.parse_l3_rules_csv(file_path)
+            self.add_log(f"Loaded {len(self.l3_rules)} L3 rules from CSV")
             self.show_l3_rules()
 
     def deploy_l3_rules(self):
         if not self.selected_targets:
             self.show_status("Please select target networks first")
+            self.add_log("L3 rules deployment failed: No target networks selected")
             return
 
         self.show_status("Starting L3 rules deployment...")
+        self.add_log(f"Starting L3 rules deployment to {len(self.selected_targets)} networks")
         success_count = 0
         total = len(self.selected_targets)
 
         for idx, target_id in enumerate(self.selected_targets, 1):
             network_name = self.get_network_name(target_id)
             self.show_status(f"Deploying to {network_name} ({idx}/{total})")
+            self.add_log(f"Deploying L3 rules to {network_name} ({idx}/{total})")
 
             if self.meraki.deploy_l3_rules(target_id, self.l3_rules):
                 success_count += 1
 
-        self.show_status(f"Deployment complete: {success_count}/{total} successful")
+        result_message = f"L3 rules deployment complete: {success_count}/{total} successful"
+        self.show_status(result_message, duration=5000)
+        self.add_log(result_message)
 
     def run(self):
         viewport_width = 1024
@@ -935,10 +1031,24 @@ class GUI:
             "main_window", width=viewport_width, height=viewport_height, pos=[0, 0]
         )
 
+        # Calculate heights for content and console areas
+        console_height = 150
+        main_content_height = viewport_height - console_height - 60  # Accounting for menu bar and padding
+        
+        # Configure main content group
+        dpg.configure_item("main_content_group", height=main_content_height)
+        
+        # Configure sidebar
+        dpg.configure_item("sidebar_window", height=main_content_height)
+        
+        # Configure content window
         content_width = viewport_width - 200
         dpg.configure_item(
-            "content_window", width=content_width, height=viewport_height - 50
+            "content_window", width=content_width, height=main_content_height
         )
+        
+        # Configure console
+        dpg.configure_item("console_window", width=viewport_width-20, height=console_height)
 
         if dpg.is_item_shown("status_window"):
             status_width = 300
