@@ -1,9 +1,12 @@
 import dearpygui.dearpygui as dpg
 import meraki
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Callable
 import time
 from datetime import datetime
 import csv
+import io
+from enum import Enum
+
 
 class RateLimiter:
     def __init__(self, requests_per_second: int = 10):
@@ -12,7 +15,6 @@ class RateLimiter:
         self.tokens = requests_per_second
         self.last_refill = datetime.now()
 
-# rate limit handler for meraki api requests, refer to the official docs for excat rates based on the operations u want to make
     def wait_if_needed(self):
         now = datetime.now()
         time_since_last = (now - self.last_refill).total_seconds()
@@ -27,17 +29,18 @@ class RateLimiter:
             time.sleep(sleep_time)
             self.tokens = 1
         self.tokens -= 1
-        self.last_request = datetime.now()
+        self.last_request = now
 
-# The "Brains of the tool" , it handles all requests, conversion, etc
+
 class MerakiManager:
     def __init__(self):
         self.dashboard: Optional[meraki.DashboardAPI] = None
         self.organization_id: Optional[str] = None
         self.networks: List[Dict] = []
         self.baseline_rules: List[Dict] = []
+        self.baseline_content_filtering: Dict = {}
         self.rate_limiter = RateLimiter()
-        self.log_callback = None  # callback function to send logs to GUI
+        self.log_callback = None
 
     def initialize_api(self, api_key: str) -> bool:
         try:
@@ -49,12 +52,11 @@ class MerakiManager:
                 retry_4xx_error_wait_time=15,
                 maximum_retries=3,
                 suppress_logging=False,
-                output_log=False,      # enable to generate a .log file for all api resuests of each session
+                output_log=False,
             )
-            # get first organization (single org use case only sorry)
             orgs = self.dashboard.organizations.getOrganizations()
             if not orgs:
-                raise Exception("No organizations found D:")
+                raise Exception("No organizations found")
             self.organization_id = orgs[0]["id"]
             return True
         except Exception as e:
@@ -62,98 +64,82 @@ class MerakiManager:
             return False
 
     def set_log_callback(self, callback):
-        """Set callback function to handle logs in GUI"""
         self.log_callback = callback
 
     def log(self, message):
-        """Log msg to GUI console"""
         if self.log_callback:
             self.log_callback(message)
         else:
-            print(message)  # Fallback if GUI not initialized
+            print(message)
 
-    def log_api_call(
-        self, method: str, endpoint: str, status_code: int, response_time: float
-    ):
-        log_entry = {
-            "timestamp": datetime.now().isoformat(),
-            "method": method,
-            "endpoint": endpoint,
-            "status_code": status_code,
-            "response_time": response_time,
-        }
-        # Log to GUI console
-        self.log(f"API Call: {method} {endpoint} - Status: {status_code} - Time: {response_time:.2f}s")
+    def _execute_api_call(self, func, error_msg, *args, **kwargs):
+        try:
+            self.rate_limiter.wait_if_needed()
+            return func(*args, **kwargs)
+        except Exception as e:
+            self.log(f"{error_msg}: {e}")
+            return [] if isinstance([], type(kwargs.get("default", []))) else {}
 
     def get_configuration_changes(self, timespan: int = 3600) -> List[Dict]:
-        try:
-            self.rate_limiter.wait_if_needed()
-            changes = self.dashboard.organizations.getOrganizationConfigurationChanges(
-                self.organization_id, timespan=timespan
-            )
-            return changes
-        except Exception as e:
-            self.log(f"Error fetching configuration changes: {e}")
-            return []
+        return self._execute_api_call(
+            self.dashboard.organizations.getOrganizationConfigurationChanges,
+            "Error fetching configuration changes",
+            self.organization_id,
+            timespan=timespan,
+        )
 
     def get_networks(self) -> List[Dict]:
-        try:
-            self.rate_limiter.wait_if_needed()
-            self.networks = self.dashboard.organizations.getOrganizationNetworks(
-                self.organization_id, total_pages="all"
-            )
-            return self.networks
-        except Exception as e:
-            self.log(f"Error fetching networks: {e}")
-            return []
+        self.networks = self._execute_api_call(
+            self.dashboard.organizations.getOrganizationNetworks,
+            "Error fetching networks",
+            self.organization_id,
+            total_pages="all",
+        )
+        return self.networks
 
     def get_devices(self) -> List[Dict]:
-        try:
-            self.rate_limiter.wait_if_needed()
-            devices = self.dashboard.organizations.getOrganizationDevices(
-                self.organization_id, total_pages="all"
-            )
-            return devices
-        except Exception as e:
-            self.log(f"Error fetching devices: {e}")
-            return []
+        return self._execute_api_call(
+            self.dashboard.organizations.getOrganizationDevices,
+            "Error fetching devices",
+            self.organization_id,
+            total_pages="all",
+        )
 
     def create_action_batch(
         self, actions: List[Dict], confirmed: bool = False, synchronous: bool = False
     ) -> Dict:
-        try:
-            self.rate_limiter.wait_if_needed()
-            response = self.dashboard.organizations.createOrganizationActionBatch(
-                self.organization_id,
-                actions=actions,
-                confirmed=confirmed,
-                synchronous=synchronous,
-            )
-            return response
-        except Exception as e:
-            self.log(f"Error creating action batch: {e}")
-            return {}
+        return self._execute_api_call(
+            self.dashboard.organizations.createOrganizationActionBatch,
+            "Error creating action batch",
+            self.organization_id,
+            actions=actions,
+            confirmed=confirmed,
+            synchronous=synchronous,
+        )
 
     def get_l7_rules(self, network_id: str) -> List[Dict]:
-        try:
-            self.rate_limiter.wait_if_needed()
-            response = (
-                self.dashboard.appliance.getNetworkApplianceFirewallL7FirewallRules(
-                    network_id
-                )
-            )
-            rules = response.get("rules", [])
-            self.baseline_rules = rules
-            return rules
-        except Exception as e:
-            self.log(f"Error fetching L7 rules: {e}")
-            return []
+        response = self._execute_api_call(
+            self.dashboard.appliance.getNetworkApplianceFirewallL7FirewallRules,
+            "Error fetching L7 rules",
+            network_id,
+        )
+        rules = response.get("rules", [])
+        self.baseline_rules = rules
+        return rules
+
+    def get_content_filtering(self, network_id: str) -> Dict:
+        self.baseline_content_filtering = self._execute_api_call(
+            self.dashboard.appliance.getNetworkApplianceContentFiltering,
+            "Error fetching content filtering",
+            network_id,
+        )
+        return self.baseline_content_filtering
 
     def deploy_l7_rules(self, target_network_id: str) -> bool:
-        try:
-            if not self.baseline_rules:
-                return False
+        if not self.baseline_rules:
+            return False
 
+        try:
             self.rate_limiter.wait_if_needed()
             self.dashboard.appliance.updateNetworkApplianceFirewallL7FirewallRules(
                 target_network_id, rules=self.baseline_rules
@@ -163,6 +149,125 @@ class MerakiManager:
         except Exception as e:
             self.log(f"Error deploying L7 rules to network {target_network_id}: {e}")
             return False
+
+    def deploy_content_filtering(self, target_network_id: str) -> bool:
+        if not self.baseline_content_filtering:
+            return False
+
+        try:
+            blocked_categories = [
+                category["id"]
+                for category in self.baseline_content_filtering.get(
+                    "blockedUrlCategories", []
+                )
+            ]
+
+            self.rate_limiter.wait_if_needed()
+            self.dashboard.appliance.updateNetworkApplianceContentFiltering(
+                target_network_id,
+                allowedUrlPatterns=self.baseline_content_filtering.get(
+                    "allowedUrlPatterns", []
+                ),
+                blockedUrlPatterns=self.baseline_content_filtering.get(
+                    "blockedUrlPatterns", []
+                ),
+                blockedUrlCategories=blocked_categories,
+                urlCategoryListSize=self.baseline_content_filtering.get(
+                    "urlCategoryListSize", "topSites"
+                ),
+            )
+            self.log(
+                f"Successfully deployed content filtering to network {target_network_id}"
+            )
+            return True
+        except Exception as e:
+            self.log(
+                f"Error deploying content filtering to network {target_network_id}: {e}"
+            )
+            return False
+
+    def get_l3_rules(self, network_id: str) -> List[Dict]:
+        response = self._execute_api_call(
+            self.dashboard.appliance.getNetworkApplianceFirewallL3FirewallRules,
+            "Error fetching L3 rules",
+            network_id,
+        )
+        rules = response.get("rules", [])
+        return rules
+
+    def deploy_l3_rules(self, target_network_id: str, rules: List[Dict]) -> bool:
+        if not rules:
+            return False
+
+        try:
+            self.rate_limiter.wait_if_needed()
+            self.dashboard.appliance.updateNetworkApplianceFirewallL3FirewallRules(
+                target_network_id, rules=rules
+            )
+            self.log(f"Successfully deployed L3 rules to network {target_network_id}")
+            return True
+        except Exception as e:
+            self.log(f"Error deploying L3 rules to network {target_network_id}: {e}")
+            return False
+
+    def export_l3_rules_to_csv(self, network_id: str, output_file: str) -> bool:
+        try:
+            rules = self.get_l3_rules(network_id)
+
+            field_names = [
+                "comment",
+                "policy",
+                "protocol",
+                "srcCidr",
+                "srcPort",
+                "destCidr",
+                "destPort",
+                "syslogEnabled",
+            ]
+
+            with open(output_file, mode="w", newline="\n") as fp:
+                csv_writer = csv.DictWriter(
+                    fp, field_names, delimiter=",", quotechar='"', quoting=csv.QUOTE_ALL
+                )
+                csv_writer.writeheader()
+                for rule in rules:
+                    # Ensure all fields exist in the rule
+                    rule_row = {field: rule.get(field, "") for field in field_names}
+                    csv_writer.writerow(rule_row)
+
+            self.log(f"Successfully exported {len(rules)} L3 rules to {output_file}")
+            return True
+        except Exception as e:
+            self.log(f"Error exporting L3 rules to CSV: {e}")
+            return False
+
+    def import_l3_rules_from_csv(self, input_file: str) -> List[Dict]:
+        try:
+            rules = []
+            with open(input_file, mode="r", newline="\n") as fp:
+                csv_reader = csv.DictReader(fp)
+                field_names = csv_reader.fieldnames
+
+                for row in csv_reader:
+                    rule = {}
+                    for field in field_names:
+                        if field in row:
+                            # Convert empty strings to None for optional fields
+                            if row[field] == "":
+                                continue
+
+                            # Convert string "True"/"False" to boolean for syslogEnabled
+                            if field == "syslogEnabled":
+                                rule[field] = row[field].lower() == "true"
+                            else:
+                                rule[field] = row[field]
+                    rules.append(rule)
+
+            self.log(f"Successfully imported {len(rules)} L3 rules from {input_file}")
+            return rules
+        except Exception as e:
+            self.log(f"Error importing L3 rules from CSV: {e}")
+            return []
 
     def fetch_uplink_statuses(self) -> list:
         try:
@@ -182,16 +287,16 @@ class MerakiManager:
                 self.organization_id, total_pages="all"
             )
 
-            # map networks and devices for ez reference
             devices_by_serial = {d["serial"]: d["name"] for d in devices}
             networks_by_id = {n["id"]: n["name"] for n in networks}
 
-            # enrich with device and network names
             for status in appliance_statuses:
                 status["name"] = devices_by_serial.get(status["serial"], "Unknown")
                 status["network"] = networks_by_id.get(status["networkId"], "Unknown")
 
-            self.log(f"Successfully fetched {len(appliance_statuses)} appliance statuses")
+            self.log(
+                f"Successfully fetched {len(appliance_statuses)} appliance statuses"
+            )
             return appliance_statuses
         except Exception as e:
             self.log(f"Error fetching uplink statuses: {e}")
@@ -212,9 +317,6 @@ class MerakiManager:
             with open(output_file, "w") as f:
                 f.write(content)
             self.log(f"WAN IPs saved to {output_file} ({len(public_ips)} IPs)")
-        else:
-            self.log(f"Generated WAN IPs list with {len(public_ips)} IPs")
-            
         return sorted_ips, content
 
     def generate_detailed_wan_info(self, output_file=None):
@@ -240,38 +342,27 @@ class MerakiManager:
         records = []
         for status in statuses:
             record = {
-                "name": status.get("name"),
-                "serial": status.get("serial"),
-                "model": status.get("model"),
-                "network": status.get("network"),
-                "networkId": status.get("networkId"),
+                "name": status.get("name", ""),
+                "serial": status.get("serial", ""),
+                "model": status.get("model", ""),
+                "network": status.get("network", ""),
+                "networkId": status.get("networkId", ""),
             }
 
-            # WAN1 and WAN2 data
             for uplink in status.get("uplinks", []):
-                if uplink.get("interface") == "wan1":
+                interface = uplink.get("interface")
+                if interface in ["wan1", "wan2"]:
                     record.update(
                         {
-                            "wan1_status": uplink.get("status"),
-                            "wan1_ip": uplink.get("ip"),
-                            "wan1_gateway": uplink.get("gateway"),
-                            "wan1_publicIp": uplink.get("publicIp"),
+                            f"{interface}_status": uplink.get("status", ""),
+                            f"{interface}_ip": uplink.get("ip", ""),
+                            f"{interface}_gateway": uplink.get("gateway", ""),
+                            f"{interface}_publicIp": uplink.get("publicIp", ""),
                         }
                     )
-                elif uplink.get("interface") == "wan2":
-                    record.update(
-                        {
-                            "wan2_status": uplink.get("status"),
-                            "wan2_ip": uplink.get("ip"),
-                            "wan2_gateway": uplink.get("gateway"),
-                            "wan2_publicIp": uplink.get("publicIp"),
-                        }
-                    )
-            
+
             records.append(record)
-        
-        # Generate CSV content as string
-        import io
+
         csv_buffer = io.StringIO()
         csv_writer = csv.DictWriter(
             csv_buffer, field_names, delimiter=",", quotechar='"', quoting=csv.QUOTE_ALL
@@ -279,121 +370,85 @@ class MerakiManager:
         csv_writer.writeheader()
         for record in records:
             csv_writer.writerow(record)
-        
+
         csv_content = csv_buffer.getvalue()
-        
+
         if output_file:
             with open(output_file, mode="w", newline="\n") as fp:
                 fp.write(csv_content)
-            self.log(f"Detailed WAN IPs saved to {output_file} ({len(statuses)} devices)")
-        else:
-            self.log(f"Generated detailed WAN information for {len(statuses)} devices")
-            
+            self.log(
+                f"Detailed WAN IPs saved to {output_file} ({len(statuses)} devices)"
+            )
+
         return records, csv_content
 
-    def check_amp_status(self) -> Dict[str, bool]:
-        self.log("Checking AMP status for all networks...")
-        amp_statuses = {}
+    def check_network_statuses(self, check_type, get_func):
+        self.log(f"Checking {check_type} status for all networks...")
+        statuses = {}
         for i, network in enumerate(self.networks):
             network_id = network["id"]
             try:
                 self.rate_limiter.wait_if_needed()
-                response = self.dashboard.appliance.getNetworkApplianceSecurityMalware(
-                    network_id
-                )
-                amp_statuses[network_id] = response.get("mode", "disabled") == "enabled"
-                if (i+1) % 10 == 0:
-                    self.log(f"Checked AMP status for {i+1}/{len(self.networks)} networks")
-            except Exception as e:
-                self.log(f"Error fetching AMP status for network {network_id}: {e}")
-                amp_statuses[network_id] = False
-        self.log(f"Completed AMP status check for {len(self.networks)} networks")
-        return amp_statuses
-
-    def check_ids_ips_status(self) -> Dict[str, Dict]:
-        self.log("Checking IDS/IPS status for all networks...")
-        ids_ips_statuses = {}
-        for i, network in enumerate(self.networks):
-            network_id = network["id"]
-            try:
-                self.rate_limiter.wait_if_needed()
-                response = (
-                    self.dashboard.appliance.getNetworkApplianceSecurityIntrusion(
-                        network_id
+                response = get_func(network_id)
+                statuses[network_id] = response
+                if (i + 1) % 10 == 0:
+                    self.log(
+                        f"Checked {check_type} status for {i + 1}/{len(self.networks)} networks"
                     )
-                )
-                ids_ips_statuses[network_id] = {
-                    "mode": response.get("mode", "disabled"),
-                    "ruleset": response.get("idsRulesets", "none"),
-                }
-                if (i+1) % 10 == 0:
-                    self.log(f"Checked IDS/IPS status for {i+1}/{len(self.networks)} networks")
-            except Exception as e:
-                self.log(f"Error fetching IDS/IPS status for network {network_id}: {e}")
-                ids_ips_statuses[network_id] = {"mode": "error", "ruleset": "error"}
-        self.log(f"Completed IDS/IPS status check for {len(self.networks)} networks")
-        return ids_ips_statuses
-
-    def check_port_forwarding_status(self) -> Dict[str, List[Dict]]:
-        self.log("Checking port forwarding rules for all networks...")
-        insecure_rules = {}
-        for i, network in enumerate(self.networks):
-            network_id = network["id"]
-            try:
-                self.rate_limiter.wait_if_needed()
-                response = self.dashboard.appliance.getNetworkApplianceFirewallPortForwardingRules(
-                    network_id
-                )
-                rules = response.get("rules", [])
-                insecure_rules[network_id] = [
-                    rule for rule in rules if "any" in rule.get("allowedIps", [])
-                ]
-                if (i+1) % 10 == 0:
-                    self.log(f"Checked port forwarding rules for {i+1}/{len(self.networks)} networks")
             except Exception as e:
                 self.log(
-                    f"Error fetching port forwarding rules for network {network_id}: {e}"
+                    f"Error fetching {check_type} status for network {network_id}: {e}"
                 )
-                insecure_rules[network_id] = []
-        self.log(f"Completed port forwarding check for {len(self.networks)} networks")
-        return insecure_rules
+                statuses[network_id] = {}
+        self.log(
+            f"Completed {check_type} status check for {len(self.networks)} networks"
+        )
+        return statuses
 
-    def parse_l3_rules_csv(self, file_path: str) -> List[Dict]:
-        self.log(f"Parsing L3 rules from CSV file: {file_path}")
-        rules = []
-        try:
-            with open(file_path, mode="r") as csv_file:
-                csv_reader = csv.DictReader(csv_file)
-                for row in csv_reader:
-                    rules.append(
-                        {
-                            "comment": row.get("comment", ""),
-                            "policy": row.get("policy", "allow"),
-                            "protocol": row.get("protocol", "tcp"),
-                            "destPort": row.get("destPort", "Any"),
-                            "destCidr": row.get("destCidr", "Any"),
-                            "srcPort": row.get("srcPort", "Any"),
-                            "srcCidr": row.get("srcCidr", "Any"),
-                        }
-                    )
-            self.log(f"Successfully parsed {len(rules)} L3 rules from CSV")
-            return rules
-        except Exception as e:
-            self.log(f"Error parsing L3 rules CSV: {e}")
-            return []
-
-    def deploy_l3_rules(self, target_network_id: str, rules: List[Dict]) -> bool:
-        try:
-            self.log(f"Deploying {len(rules)} L3 rules to network {target_network_id}")
-            self.rate_limiter.wait_if_needed()
-            self.dashboard.appliance.updateNetworkApplianceFirewallCellularFirewallRules(
-                target_network_id, rules=rules
+    def check_amp_status(self) -> Dict[str, bool]:
+        def get_amp(network_id):
+            response = self.dashboard.appliance.getNetworkApplianceSecurityMalware(
+                network_id
             )
-            self.log(f"Successfully deployed L3 rules to network {target_network_id}")
-            return True
-        except Exception as e:
-            self.log(f"Error deploying L3 rules to network {target_network_id}: {e}")
-            return False
+            return response.get("mode", "disabled") == "enabled"
+
+        return self.check_network_statuses("AMP", get_amp)
+
+    def check_ids_ips_status(self) -> Dict[str, Dict]:
+        def get_ids_ips(network_id):
+            response = self.dashboard.appliance.getNetworkApplianceSecurityIntrusion(
+                network_id
+            )
+            return {
+                "mode": response.get("mode", "disabled"),
+                "ruleset": response.get("idsRulesets", "none"),
+            }
+
+        return self.check_network_statuses("IDS/IPS", get_ids_ips)
+
+    def check_port_forwarding_status(self) -> Dict[str, List[Dict]]:
+        def get_port_forwarding(network_id):
+            response = (
+                self.dashboard.appliance.getNetworkApplianceFirewallPortForwardingRules(
+                    network_id
+                )
+            )
+            rules = response.get("rules", [])
+            return [rule for rule in rules if "any" in rule.get("allowedIps", [])]
+
+        return self.check_network_statuses("port forwarding rules", get_port_forwarding)
+
+
+class ViewType(Enum):
+    NONE = 0
+    L7_RULES = 1
+    CONTENT_FILTERING = 2
+    L3_RULES = 3
+    PUBLIC_IPS = 4
+    IDS_IPS_STATUS = 5
+    AMP_STATUS = 6
+    PORT_FORWARDING = 7
+    NETWORK_SELECTION = 8
 
 
 class GUI:
@@ -404,34 +459,39 @@ class GUI:
         self.network_filter: str = ""
         self.sort_ascending: bool = True
         self.l3_rules: List[Dict] = []
-        self.current_view: str = ""
+        self.current_view: ViewType = ViewType.NONE
         self.console_logs: List[str] = []
-        self.max_console_logs = 500  # Maximum number of log entries to keep
+        self.max_console_logs = 500
+        self.deploy_option: str = "l7"
+        self.selection_callback: Optional[Callable] = None
+        self.status_bar_tag = "status_bar"
 
     def add_log(self, message: str):
-        """Add a log message to the console"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         log_entry = f"[{timestamp}] {message}"
         self.console_logs.append(log_entry)
-        
-        # Keep only the last max_console_logs entries
+
         if len(self.console_logs) > self.max_console_logs:
-            self.console_logs = self.console_logs[-self.max_console_logs:]
-            
-        # Update the console display if it exists
+            self.console_logs = self.console_logs[-self.max_console_logs :]
+
         if dpg.does_item_exist("console_text"):
             dpg.set_value("console_text", "\n".join(self.console_logs))
-            dpg.set_y_scroll("console_window", -1.0)  # Auto-scroll to bottom
+            dpg.set_y_scroll("console_window", -1.0)
+
+        if dpg.does_item_exist(self.status_bar_tag):
+            dpg.set_value(self.status_bar_tag, log_entry)
 
     def setup_gui(self):
         dpg.create_context()
 
+        # authentication window
         with dpg.window(
             label="Meraki Authentication",
             tag="auth_window",
             no_resize=True,
             no_move=True,
             no_collapse=True,
+            no_close=True,
         ):
             dpg.add_input_text(
                 label="API Key",
@@ -442,8 +502,9 @@ class GUI:
             )
             dpg.add_button(label="Connect", callback=self.authenticate)
 
+        # Main application window
         with dpg.window(
-            label="Mirage - V0.2",
+            label="Mirage - V0.4",
             tag="main_window",
             show=False,
             no_resize=True,
@@ -453,73 +514,143 @@ class GUI:
         ):
             with dpg.menu_bar():
                 with dpg.menu(label="Menu"):
-                    dpg.add_menu_item(label="Logout", callback=self.logout)
                     dpg.add_menu_item(
                         label="Refresh Networks", callback=self.refresh_networks
                     )
                     dpg.add_menu_item(
                         label="Clear Console", callback=self.clear_console
                     )
+                    dpg.add_menu_item(
+                        label="Exit", callback=lambda: dpg.stop_dearpygui()
+                    )
 
-            # Main layout with sidebar, content window, and console
             with dpg.group(horizontal=False):
-                # Top section with sidebar and content
+                # Main content area (sidebar + content)
                 with dpg.group(horizontal=True, tag="main_content_group"):
-                    with dpg.child_window(width=200, border=False, tag="sidebar_window"):
-                        with dpg.collapsing_header(label="Deployment", default_open=True):
+                    # Sidebar with navigation buttons
+                    with dpg.child_window(
+                        width=200, border=False, tag="sidebar_window"
+                    ):
+                        with dpg.collapsing_header(
+                            label="Deployment", default_open=True
+                        ):
                             dpg.add_button(
-                                label="L7 Rules", callback=self.show_l7_rules, width=-1
+                                label="L7 Rules",
+                                callback=lambda: self.change_view(ViewType.L7_RULES),
+                                width=-1,
                             )
                             dpg.add_button(
-                                label="L3 Rules", callback=self.show_l3_rules, width=-1
+                                label="Content Filtering",
+                                callback=lambda: self.change_view(
+                                    ViewType.CONTENT_FILTERING
+                                ),
+                                width=-1,
                             )
-                        with dpg.collapsing_header(label="Assessment", default_open=True):
+                            dpg.add_button(
+                                label="L3 Rules",
+                                callback=lambda: self.change_view(ViewType.L3_RULES),
+                                width=-1,
+                            )
+                        with dpg.collapsing_header(
+                            label="Assessment", default_open=True
+                        ):
                             dpg.add_button(
                                 label="Public IPs",
-                                callback=self.show_public_ips_content,
+                                callback=lambda: self.change_view(ViewType.PUBLIC_IPS),
                                 width=-1,
                             )
                             dpg.add_button(
-                                label="IPS/IPS Status",
-                                callback=self.show_ids_ips_status,
+                                label="IDS/IPS Status",
+                                callback=lambda: self.change_view(
+                                    ViewType.IDS_IPS_STATUS
+                                ),
                                 width=-1,
                             )
                             dpg.add_button(
-                                label="AMP Status", callback=self.show_amp_status, width=-1
+                                label="AMP Status",
+                                callback=lambda: self.change_view(ViewType.AMP_STATUS),
+                                width=-1,
                             )
                             dpg.add_button(
                                 label="Port Forwarding Check",
-                                callback=self.show_port_forwarding_check,
+                                callback=lambda: self.change_view(
+                                    ViewType.PORT_FORWARDING
+                                ),
                                 width=-1,
                             )
 
+                    # Main content window
                     with dpg.child_window(tag="content_window", border=False):
                         pass
-                
-                # Console at the bottom
-                with dpg.collapsing_header(label="Console", default_open=True, tag="console_header"):
-                    with dpg.child_window(tag="console_window", height=150, horizontal_scrollbar=True):
+
+                # console and status bar
+                with dpg.collapsing_header(
+                    label="Console", default_open=True, tag="console_header"
+                ):
+                    with dpg.child_window(
+                        tag="console_window", height=150, horizontal_scrollbar=True
+                    ):
                         dpg.add_text("", tag="console_text", wrap=0)
 
-        with dpg.window(
-            label="Status",
-            tag="status_window",
-            show=False,
-            modal=True,
-            no_resize=True,
-            no_move=True,
-        ):
-            dpg.add_text(tag="status_text")
-    
+                dpg.add_text("Ready", tag=self.status_bar_tag)
+
     def clear_console(self):
-        """Clear the console log"""
         self.console_logs = []
         if dpg.does_item_exist("console_text"):
             dpg.set_value("console_text", "")
 
-    def show_network_selection(self, title: str, multi_select: bool = False):
-        self.current_view = f"network_selection_{title}_{multi_select}"
+    def change_view(self, view_type: ViewType, extra_data=None):
+        self.current_view = view_type
         dpg.delete_item("content_window", children_only=True)
+
+        if view_type == ViewType.L7_RULES:
+            self.deploy_option = "l7"
+            if not self.selected_baseline:
+                self.show_network_selection(
+                    "Select Baseline Network", False, self.handle_l7_baseline_selection
+                )
+            else:
+                self.show_l7_deployment_interface()
+
+        elif view_type == ViewType.CONTENT_FILTERING:
+            self.deploy_option = "content_filtering"
+            if not self.selected_baseline:
+                self.show_network_selection(
+                    "Select Baseline Network for Content Filtering",
+                    False,
+                    self.handle_content_filtering_baseline_selection,
+                )
+            else:
+                self.show_content_filtering_interface()
+
+        elif view_type == ViewType.L3_RULES:
+            self.deploy_option = "l3"
+            self.show_l3_rules()
+
+        elif view_type == ViewType.PUBLIC_IPS:
+            self.show_public_ips_content()
+
+        elif view_type == ViewType.IDS_IPS_STATUS:
+            self.show_ids_ips_status()
+
+        elif view_type == ViewType.AMP_STATUS:
+            self.show_amp_status()
+
+        elif view_type == ViewType.PORT_FORWARDING:
+            self.show_port_forwarding_check()
+
+        elif view_type == ViewType.NETWORK_SELECTION:
+            if isinstance(extra_data, dict):
+                self.show_network_selection(
+                    extra_data.get("title", "Select Networks"),
+                    extra_data.get("multi_select", False),
+                    extra_data.get("callback", None),
+                )
+
+    def show_network_selection(
+        self, title: str, multi_select: bool = False, callback: Callable = None
+    ):
+        self.selection_callback = callback
 
         with dpg.group(parent="content_window"):
             with dpg.group(horizontal=True):
@@ -527,59 +658,51 @@ class GUI:
                 dpg.add_input_text(
                     label="Search",
                     tag="network_filter",
-                    callback=lambda s, a: self.handle_filter_input(a, multi_select),
+                    callback=lambda s, a: self.handle_filter_input(a),
                     on_enter=True,
                     default_value=self.network_filter,
                     width=200,
                 )
                 dpg.add_button(
                     label="Sort (A-Z)" if self.sort_ascending else "Sort (Z-A)",
-                    callback=lambda: self.toggle_sort(multi_select),
+                    callback=self.toggle_sort,
                 )
 
             if multi_select:
                 with dpg.group(horizontal=True):
                     dpg.add_button(
-                        label="Select All", callback=lambda: self.select_all_networks(multi_select)
+                        label="Select All", callback=self.select_all_networks
                     )
                     dpg.add_button(
-                        label="Clear Selection", callback=lambda: self.clear_selection(multi_select)
+                        label="Clear Selection", callback=self.clear_selection
                     )
 
-            dpg.add_table(
-                header_row=True,
-                borders_innerH=True,
-                borders_outerH=True,
-                tag="networks_table",
-            )
-
-            dpg.add_table_column(label="Network Name", width=400, parent="networks_table")
-            dpg.add_table_column(label="Select", width=100, parent="networks_table")
-
-            self.update_network_table(multi_select)
+            self.create_network_table(multi_select)
 
             if multi_select:
                 with dpg.group(horizontal=True):
-                    dpg.add_text(f"Selected: {len(self.selected_targets)}")
+                    dpg.add_text(
+                        f"Selected: {len(self.selected_targets)}",
+                        tag="selected_count_text",
+                    )
                     dpg.add_button(
                         label="Done",
-                        callback=self.handle_multi_select_done,
+                        callback=lambda: self.selection_callback()
+                        if self.selection_callback
+                        else None,
                         width=100,
                     )
 
-    def handle_multi_select_done(self):
-        if "L3" in self.current_view:
-            self.show_l3_rules()
-        else:
-            self.show_l7_deployment_interface()
+    def create_network_table(self, multi_select: bool):
+        dpg.add_table(
+            header_row=True,
+            borders_innerH=True,
+            borders_outerH=True,
+            tag="networks_table",
+        )
 
-    def handle_filter_input(self, app_data: str, multi_select: bool):
-        self.network_filter = app_data
-        self.update_network_table(multi_select)
-
-    def update_network_table(self, multi_select: bool):
-        for child in dpg.get_item_children("networks_table", slot=1):
-            dpg.delete_item(child)
+        dpg.add_table_column(label="Network Name", width=400, parent="networks_table")
+        dpg.add_table_column(label="Select", width=100, parent="networks_table")
 
         filtered_networks = self.filter_and_sort_networks()
 
@@ -606,57 +729,63 @@ class GUI:
                             user_data={"id": network["id"], "name": network["name"]},
                         )
 
-    def show_l7_deployment_interface(self):
-        self.current_view = "l7_deployment"
-        if not self.selected_baseline:
-            self.show_status("No baseline network selected!")
-            self.show_network_selection("Select Baseline Network", False)
-            return
-
-        dpg.delete_item("content_window", children_only=True)
-
-        with dpg.group(parent="content_window"):
-            with dpg.group(horizontal=True):
-                dpg.add_text("Baseline Network:", color=(255, 255, 0))
-                dpg.add_text(self.get_network_name(self.selected_baseline))
-
-            dpg.add_text("Current L7 Rules:", color=(255, 255, 0))
-            
-            rules = self.meraki.get_l7_rules(self.selected_baseline)
-
-            if rules:
-                with dpg.table(header_row=True, borders_innerH=True, borders_outerH=True):
-                    dpg.add_table_column(label="Policy", width=100)
-                    dpg.add_table_column(label="Type", width=100)
-                    dpg.add_table_column(label="Value", width=200)
-
-                    for rule in rules:
-                        with dpg.table_row():
-                            policy_color = (255, 100, 100) if rule["policy"] == "deny" else (100, 255, 100)
-                            dpg.add_text(rule["policy"], color=policy_color)
-                            dpg.add_text(rule["type"])
-                            dpg.add_text(rule["value"])
+    def handle_filter_input(self, app_data: str):
+        self.network_filter = app_data
+        multi_select = False
+        if self.selection_callback is not None:
+            if self.selection_callback.__name__ in [
+                "handle_l7_baseline_selection",
+                "handle_content_filtering_baseline_selection",
+                "handle_l3_network_selection",
+            ]:
+                multi_select = False
             else:
-                dpg.add_text("No rules configured", color=(255, 255, 0))
+                multi_select = True
+        self.update_network_table(multi_select)
 
-            with dpg.group(horizontal=True):
-                dpg.add_button(
-                    label="Change Baseline", callback=self.reset_baseline, width=150
-                )
-                dpg.add_button(
-                    label="Select Targets",
-                    callback=lambda: self.show_network_selection(
-                        "Select Target Networks", True
-                    ),
-                    width=150,
-                )
+    def update_network_table(self, multi_select: bool):
+        # Remove all rows
+        if dpg.does_item_exist("networks_table"):
+            children = dpg.get_item_children("networks_table", slot=1)
+            if children:
+                for child in children:
+                    dpg.delete_item(child)
 
-            if self.selected_targets:
-                with dpg.group(horizontal=True):
-                    dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
-                    dpg.add_button(
-                        label="Deploy Config", callback=self.deploy_config, width=150
-                    )
+            # Add new rows based on filtered networks
+            filtered_networks = self.filter_and_sort_networks()
+
+            if not filtered_networks:
+                with dpg.table_row(parent="networks_table"):
+                    dpg.add_text("No networks found")
+                    dpg.add_text("")
+            else:
+                for network in filtered_networks:
+                    with dpg.table_row(parent="networks_table"):
+                        dpg.add_text(network["name"])
+                        if multi_select:
+                            checkbox_tag = f"checkbox_{network['id']}"
+                            dpg.add_checkbox(
+                                tag=checkbox_tag,
+                                default_value=network["id"] in self.selected_targets,
+                                callback=lambda s, a, u: self.toggle_target_selection(
+                                    u
+                                ),
+                                user_data=network["id"],
+                            )
+                        else:
+                            dpg.add_button(
+                                label="Select",
+                                callback=lambda s, a, u: self.select_baseline(u),
+                                user_data={
+                                    "id": network["id"],
+                                    "name": network["name"],
+                                },
+                            )
+
+        if dpg.does_item_exist("selected_count_text"):
+            dpg.set_value(
+                "selected_count_text", f"Selected: {len(self.selected_targets)}"
+            )
 
     def filter_and_sort_networks(self) -> List[Dict]:
         networks = self.meraki.networks
@@ -668,49 +797,39 @@ class GUI:
             networks, key=lambda x: x["name"], reverse=not self.sort_ascending
         )
 
-    def show_status(self, message: str, duration: int = 3000):
-        dpg.set_value("status_text", message)
-        dpg.configure_item("status_window", show=True)
-        dpg.set_item_pos(
-            "status_window",
-            [dpg.get_viewport_width() // 2 - 150, dpg.get_viewport_height() // 2 - 50],
-        )
-        dpg.split_frame(delay=duration)
-        dpg.configure_item("status_window", show=False)
-
-    def toggle_sort(self, multi_select: bool):
+    def toggle_sort(self):
         self.sort_ascending = not self.sort_ascending
-        self.update_network_table(multi_select)
+        self.update_network_table(self.selection_callback is not None)
 
     def select_baseline(self, network_data: Dict):
         self.selected_baseline = network_data["id"]
-        self.show_l7_deployment_interface()
+        self.add_log(f"Selected baseline network: {network_data['name']}")
 
-    def reset_baseline(self):
-        self.selected_baseline = None
-        self.show_network_selection("Select Baseline Network", False)
+        if self.deploy_option == "content_filtering":
+            self.show_content_filtering_interface()
+        elif self.deploy_option == "l3":
+            self.show_l3_rules()
+        else:
+            self.show_l7_deployment_interface()
 
     def toggle_target_selection(self, network_id: str):
         if network_id in self.selected_targets:
             self.selected_targets.remove(network_id)
         else:
             self.selected_targets.append(network_id)
-        
-        # Update any selected count text
-        if dpg.does_item_exist("content_window"):
-            for child in dpg.get_item_children("content_window", slot=1):
-                if isinstance(child, list):
-                    for item in child:
-                        if dpg.get_item_type(item) == "mvText" and "Selected" in dpg.get_item_label(item):
-                            dpg.set_value(item, f"Selected: {len(self.selected_targets)}")
 
-    def select_all_networks(self, multi_select: bool):
+        if dpg.does_item_exist("selected_count_text"):
+            dpg.set_value(
+                "selected_count_text", f"Selected: {len(self.selected_targets)}"
+            )
+
+    def select_all_networks(self):
         self.selected_targets = [n["id"] for n in self.filter_and_sort_networks()]
-        self.update_network_table(multi_select)
+        self.update_network_table(True)
 
-    def clear_selection(self, multi_select: bool):
+    def clear_selection(self):
         self.selected_targets = []
-        self.update_network_table(multi_select)
+        self.update_network_table(True)
 
     def get_network_name(self, network_id: str) -> str:
         for network in self.meraki.networks:
@@ -718,102 +837,420 @@ class GUI:
                 return network["name"]
         return "Unknown Network"
 
+    def show_deployment_status(self, success_count: int, total: int, deploy_type: str):
+        result_message = (
+            f"{deploy_type} deployment complete: {success_count}/{total} successful"
+        )
+        self.add_log(result_message)
+
     def deploy_config(self):
         if not self.selected_targets:
-            self.show_status("Please select target networks first")
-            self.add_log("Deployment failed: No target networks selected")
+            self.add_log("⚠️ Deployment failed: No target networks selected")
             return
 
-        self.show_status("Starting deployment...")
-        self.add_log(f"Starting L7 rules deployment to {len(self.selected_targets)} networks")
+        deploy_type = self.deploy_option
+
+        if deploy_type == "content_filtering":
+            deploy_function = self.meraki.deploy_content_filtering
+        elif deploy_type == "l3":
+            if not self.l3_rules:
+                self.add_log("⚠️ Deployment failed: No L3 rules to deploy")
+                return
+            deploy_function = lambda target_id: self.meraki.deploy_l3_rules(
+                target_id, self.l3_rules
+            )
+        else:  # l7
+            deploy_function = self.meraki.deploy_l7_rules
+
+        self.add_log(
+            f"Starting {deploy_type} deployment to {len(self.selected_targets)} networks"
+        )
         success_count = 0
         total = len(self.selected_targets)
 
         for idx, target_id in enumerate(self.selected_targets, 1):
             network_name = self.get_network_name(target_id)
-            self.show_status(f"Deploying to {network_name} ({idx}/{total})")
             self.add_log(f"Deploying to {network_name} ({idx}/{total})")
 
-            if self.meraki.deploy_l7_rules(target_id):
+            if deploy_function(target_id):
                 success_count += 1
 
-        result_message = f"Deployment complete: {success_count}/{total} successful"
-        self.show_status(result_message, duration=5000)
-        self.add_log(result_message)
+        self.show_deployment_status(success_count, total, deploy_type)
 
     def authenticate(self):
         api_key = dpg.get_value("api_key_input")
-        self.show_status("Let me cook...")
-        
-        # Set logging callback before API initialization
+        self.add_log("Authenticating...")
+
         self.meraki.set_log_callback(self.add_log)
-        
+
         if self.meraki.initialize_api(api_key):
             dpg.hide_item("auth_window")
             dpg.show_item("main_window")
-            self.show_status("Loading networks...")
             self.add_log("Authentication successful, loading networks...")
             self.meraki.get_networks()
-            self.show_status("Connected" if self.meraki.networks else "No networks found")
+            self.add_log(f"Loaded {len(self.meraki.networks)} networks")
         else:
-            self.show_status("Authentication failed!")
-
-    def logout(self):
-        self.meraki = MerakiManager()
-        self.meraki.set_log_callback(self.add_log)
-        self.add_log("Logged out, Bye Bye bosssman")
-        self.selected_baseline = None
-        self.selected_targets = []
-        self.current_view = ""
-        dpg.hide_item("main_window")
-        dpg.show_item("auth_window")
-        dpg.set_value("api_key_input", "")
+            self.add_log(
+                "⚠️ Authentication failed! Please check your API key and try again."
+            )
 
     def refresh_networks(self):
-        self.show_status("Refreshing networks...")
         self.add_log("Refreshing networks...")
         networks = self.meraki.get_networks()
         if networks:
-            self.show_status("Networks refreshed!")
-            self.add_log(f"Networks refreshed successfully. Found {len(networks)} networks.")
-            
-            # Refresh current view
-            if self.current_view == "l7_deployment":
-                self.show_l7_deployment_interface()
-            elif self.current_view.startswith("network_selection"):
-                if "L3" in self.current_view:
-                    self.show_network_selection("Select Target Networks for L3 Rules", True)
-                elif "Target" in self.current_view:
-                    self.show_network_selection("Select Target Networks", True)
-                else:
-                    self.show_network_selection("Select Baseline Network", False)
-            elif self.current_view == "l3_rules":
-                self.show_l3_rules()
-            elif self.current_view == "amp_status":
-                self.show_amp_status()
-            elif self.current_view == "ids_ips_status":
-                self.show_ids_ips_status()
-            elif self.current_view == "port_forwarding":
-                self.show_port_forwarding_check()
-            elif self.current_view == "public_ips":
-                self.show_public_ips_content()
-        else:
-            self.show_status("Failed to refresh networks")
-            self.add_log("Failed to refresh networks")
+            self.add_log(
+                f"Networks refreshed successfully. Found {len(networks)} networks."
+            )
 
-    def show_l7_rules(self):
-        if not self.selected_baseline:
-            self.show_network_selection("Select Baseline Network", False)
+            # Refresh current view
+            self.change_view(self.current_view)
         else:
-            self.show_l7_deployment_interface()
+            self.add_log("⚠️ Failed to refresh networks")
+
+    def show_l7_deployment_interface(self):
+        if not self.selected_baseline:
+            self.add_log("⚠️ No baseline network selected")
+            self.show_network_selection(
+                "Select Baseline Network", False, self.handle_l7_baseline_selection
+            )
+            return
+
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Baseline Network:", color=(255, 255, 0))
+                dpg.add_text(self.get_network_name(self.selected_baseline))
+
+            dpg.add_text("Current L7 Rules:", color=(255, 255, 0))
+
+            rules = self.meraki.get_l7_rules(self.selected_baseline)
+
+            if rules:
+                with dpg.table(
+                    header_row=True, borders_innerH=True, borders_outerH=True
+                ):
+                    dpg.add_table_column(label="Policy", width=100)
+                    dpg.add_table_column(label="Type", width=100)
+                    dpg.add_table_column(label="Value", width=200)
+
+                    for rule in rules:
+                        with dpg.table_row():
+                            policy_color = (
+                                (255, 100, 100)
+                                if rule["policy"] == "deny"
+                                else (100, 255, 100)
+                            )
+                            dpg.add_text(rule["policy"], color=policy_color)
+                            dpg.add_text(rule["type"])
+                            dpg.add_text(rule["value"])
+            else:
+                dpg.add_text("No rules configured", color=(255, 255, 0))
+
+            self.add_deployment_buttons()
+
+    def handle_l7_baseline_selection(self):
+        self.show_l7_deployment_interface()
+
+    def handle_content_filtering_baseline_selection(self):
+        self.show_content_filtering_interface()
+
+    def handle_l3_network_selection(self):
+        if self.selected_baseline:
+            self.l3_rules = self.meraki.get_l3_rules(self.selected_baseline)
+            self.show_l3_rules()
+
+    def add_deployment_buttons(self):
+        with dpg.group(horizontal=True):
+            dpg.add_button(
+                label="Change Baseline", callback=self.reset_baseline, width=150
+            )
+            dpg.add_button(
+                label="Select Targets",
+                callback=self.select_deployment_targets,
+                width=150,
+            )
+
+        if self.selected_targets:
+            with dpg.group(horizontal=True):
+                dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
+                dpg.add_button(
+                    label="Deploy Config", callback=self.deploy_config, width=150
+                )
+
+    def reset_baseline(self):
+        self.selected_baseline = None
+        if self.deploy_option == "content_filtering":
+            self.change_view(ViewType.CONTENT_FILTERING)
+        elif self.deploy_option == "l3":
+            self.change_view(ViewType.L3_RULES)
+        else:
+            self.change_view(ViewType.L7_RULES)
+
+    def select_deployment_targets(self):
+        callback = None
+        if self.deploy_option == "content_filtering":
+            callback = lambda: self.change_view(ViewType.CONTENT_FILTERING)
+        elif self.deploy_option == "l3":
+            callback = lambda: self.change_view(ViewType.L3_RULES)
+        else:
+            callback = lambda: self.change_view(ViewType.L7_RULES)
+
+        self.show_network_selection("Select Target Networks", True, callback)
+
+    def show_content_filtering_interface(self):
+        if not self.selected_baseline:
+            self.add_log("⚠️ No baseline network selected for content filtering")
+            self.show_network_selection(
+                "Select Baseline Network for Content Filtering",
+                False,
+                self.handle_content_filtering_baseline_selection,
+            )
+            return
+
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Baseline Network:", color=(255, 255, 0))
+                dpg.add_text(self.get_network_name(self.selected_baseline))
+
+            dpg.add_text(
+                "Current Content Filtering Configuration:", color=(255, 255, 0)
+            )
+
+            content_filtering = self.meraki.get_content_filtering(
+                self.selected_baseline
+            )
+
+            if content_filtering:
+                dpg.add_text("Allowed URL Patterns:", color=(100, 255, 100))
+                if content_filtering.get("allowedUrlPatterns", []):
+                    for url in content_filtering.get("allowedUrlPatterns", []):
+                        dpg.add_text(url, indent=20)
+                else:
+                    dpg.add_text("No allowed URL patterns configured", indent=20)
+
+                dpg.add_text("Blocked URL Patterns:", color=(255, 100, 100))
+                if content_filtering.get("blockedUrlPatterns", []):
+                    for url in content_filtering.get("blockedUrlPatterns", []):
+                        dpg.add_text(url, indent=20)
+                else:
+                    dpg.add_text("No blocked URL patterns configured", indent=20)
+
+                dpg.add_text("Blocked URL Categories:", color=(255, 100, 100))
+                if content_filtering.get("blockedUrlCategories", []):
+                    for category in content_filtering.get("blockedUrlCategories", []):
+                        dpg.add_text(
+                            f"{category.get('name', 'Unknown')} ({category.get('id', 'Unknown')})",
+                            indent=20,
+                        )
+                else:
+                    dpg.add_text("No blocked URL categories configured", indent=20)
+
+                dpg.add_text(
+                    f"URL Category List Size: {content_filtering.get('urlCategoryListSize', 'Unknown')}"
+                )
+            else:
+                dpg.add_text(
+                    "No content filtering configuration found", color=(255, 255, 0)
+                )
+
+            self.add_deployment_buttons()
+
+    def show_l3_rules(self):
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            dpg.add_text("L3 Firewall Rules", color=(255, 255, 0))
+
+            with dpg.group(horizontal=True):
+                if not self.selected_baseline:
+                    dpg.add_button(
+                        label="Select Network",
+                        callback=lambda: self.show_network_selection(
+                            "Select Network for L3 Rules",
+                            False,
+                            self.handle_l3_network_selection,
+                        ),
+                        width=150,
+                    )
+                else:
+                    network_name = self.get_network_name(self.selected_baseline)
+                    dpg.add_text(f"Selected Network: {network_name}")
+
+                    dpg.add_button(
+                        label="Extract to CSV",
+                        callback=self.export_l3_rules,
+                        width=150,
+                    )
+
+            if self.selected_baseline or self.l3_rules:
+                with dpg.group(horizontal=True):
+                    dpg.add_button(
+                        label="Import from CSV",
+                        callback=self.import_l3_rules,
+                        width=150,
+                    )
+
+                    if self.l3_rules:
+                        dpg.add_button(
+                            label="Select Targets for Deployment",
+                            callback=self.select_l3_deployment_targets,
+                            width=200,
+                        )
+
+            if self.l3_rules:
+                if hasattr(self, "rules_imported") and self.rules_imported:
+                    dpg.add_text("Imported L3 Firewall Rules:", color=(255, 255, 0))
+                else:
+                    dpg.add_text("Current L3 Firewall Rules:", color=(255, 255, 0))
+
+                self.display_l3_rules_table()
+
+                # show deployment info if targets selected
+                if self.selected_targets:
+                    with dpg.group(horizontal=True):
+                        dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
+                        dpg.add_button(
+                            label="Deploy L3 Rules",
+                            callback=self.deploy_config,
+                            width=150,
+                        )
+            elif self.selected_baseline:
+                # display current network rules if we have a baseline but no imported rules
+                self.display_l3_rules(self.selected_baseline)
+
+    def display_l3_rules(self, network_id):
+        rules = self.meraki.get_l3_rules(network_id)
+        self.l3_rules = rules
+        self.rules_imported = False
+
+        if not rules:
+            dpg.add_text("No L3 rules found", color=(255, 255, 0))
+            return
+
+        self.display_l3_rules_table()
+
+    def display_l3_rules_table(self):
+        if not self.l3_rules:
+            dpg.add_text("No L3 rules found", color=(255, 255, 0))
+            return
+
+        with dpg.table(header_row=True, borders_innerH=True, borders_outerH=True):
+            dpg.add_table_column(label="Comment", width=150)
+            dpg.add_table_column(label="Policy", width=80)
+            dpg.add_table_column(label="Protocol", width=80)
+            dpg.add_table_column(label="Source CIDR", width=120)
+            dpg.add_table_column(label="Source Port", width=100)
+            dpg.add_table_column(label="Dest CIDR", width=120)
+            dpg.add_table_column(label="Dest Port", width=100)
+            dpg.add_table_column(label="Syslog", width=60)
+
+            for rule in self.l3_rules:
+                with dpg.table_row():
+                    dpg.add_text(rule.get("comment", ""))
+                    policy = rule.get("policy", "")
+                    policy_color = (
+                        (100, 255, 100) if policy == "allow" else (255, 100, 100)
+                    )
+                    dpg.add_text(policy, color=policy_color)
+                    dpg.add_text(rule.get("protocol", ""))
+                    dpg.add_text(rule.get("srcCidr", ""))
+                    dpg.add_text(rule.get("srcPort", ""))
+                    dpg.add_text(rule.get("destCidr", ""))
+                    dpg.add_text(rule.get("destPort", ""))
+                    dpg.add_text("Yes" if rule.get("syslogEnabled", False) else "No")
+
+    def export_l3_rules(self):
+        if not self.selected_baseline:
+            self.add_log("⚠️ No network selected for exporting L3 rules")
+            return
+
+        network_name = self.get_network_name(self.selected_baseline)
+
+        with dpg.file_dialog(
+            label="Save L3 Rules as CSV",
+            width=600,
+            height=400,
+            callback=lambda s, a: self.save_l3_rules_to_csv(a),
+            show=True,
+            default_path=".",
+            default_filename=f"{network_name}_l3_rules.csv",
+            file_count=0,
+            tag="save_l3_rules_dialog",
+            directory_selector=False,
+        ):
+            dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
+
+    def save_l3_rules_to_csv(self, app_data):
+        if app_data["file_path_name"]:
+            file_path = app_data["file_path_name"]
+            self.add_log(f"Exporting L3 rules to {file_path}...")
+            success = self.meraki.export_l3_rules_to_csv(
+                self.selected_baseline, file_path
+            )
+            if success:
+                self.add_log(f"L3 rules successfully exported to {file_path}")
+            else:
+                self.add_log("⚠️ Failed to export L3 rules")
+        else:
+            self.add_log("L3 rules export cancelled")
+
+    def import_l3_rules(self):
+        with dpg.file_dialog(
+            label="Import L3 Rules from CSV",
+            width=600,
+            height=400,
+            callback=lambda s, a: self.load_l3_rules_from_csv(a),
+            show=True,
+            default_path=".",
+            file_count=0,
+            tag="import_l3_rules_dialog",
+            directory_selector=False,
+        ):
+            dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
+
+    def load_l3_rules_from_csv(self, app_data):
+        if not app_data["file_path_name"]:
+            self.add_log("L3 rules import cancelled")
+            return
+
+        file_path = app_data["file_path_name"]
+        self.add_log(f"Importing L3 rules from {file_path}...")
+        imported_rules = self.meraki.import_l3_rules_from_csv(file_path)
+
+        if imported_rules:
+            self.rules_imported = True
+
+            # clear the baseline - we now using imported rules instead
+            # imported rules take precedence
+            self.l3_rules = imported_rules
+
+            self.add_log(f"Successfully imported {len(self.l3_rules)} L3 rules")
+            # refresh the display
+            self.show_l3_rules()
+        else:
+            self.add_log("⚠️ Failed to import L3 rules")
+
+    def select_l3_deployment_targets(self):
+        if not self.l3_rules:
+            self.add_log("⚠️ No L3 rules to deploy")
+            return
+
+        # use lambda that doesn't interfere with baseline selection
+        self.show_network_selection(
+            "Select Target Networks for L3 Rules Deployment",
+            True,
+            lambda: self.change_view(ViewType.L3_RULES),
+        )
 
     def show_public_ips_content(self):
-        self.current_view = "public_ips"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
             dpg.add_text("Public IPs", color=(255, 255, 0))
-            
+
             with dpg.group(horizontal=True):
                 dpg.add_button(
                     label="Extract Raw WAN IPs",
@@ -829,32 +1266,30 @@ class GUI:
     def extract_raw_wan_ips(self):
         self.add_log("Starting extraction of raw WAN IPs...")
         ips, content = self.meraki.generate_raw_wan_ips()
-        
+
         if not ips:
-            self.show_status("No WAN IPs found!")
+            self.add_log("⚠️ No WAN IPs found!")
             return
-            
+
         with dpg.file_dialog(
             label="Save WAN IPs",
             width=600,
             height=400,
             callback=lambda s, a: self.save_raw_wan_ips(a, content),
             show=True,
-            modal=True,
             default_path=".",
             default_filename="wan_ips.txt",
-            file_count=0,  # This is for saving, not opening
+            file_count=0,
             tag="save_raw_ips_dialog",
             directory_selector=False,
         ):
             dpg.add_file_extension(".txt", color=(0, 255, 0, 255))
-    
+
     def save_raw_wan_ips(self, app_data, content):
         if app_data["file_path_name"]:
             file_path = app_data["file_path_name"]
             with open(file_path, "w") as f:
                 f.write(content)
-            self.show_status(f"Raw WAN IPs saved to {file_path}!")
             self.add_log(f"Raw WAN IPs saved to {file_path}")
         else:
             self.add_log("Raw WAN IPs save cancelled")
@@ -862,43 +1297,41 @@ class GUI:
     def extract_detailed_wan_info(self):
         self.add_log("Starting extraction of detailed WAN information...")
         records, csv_content = self.meraki.generate_detailed_wan_info()
-        
+
         if not records:
-            self.show_status("No WAN information found!")
+            self.add_log("⚠️ No WAN information found!")
             return
-            
+
         with dpg.file_dialog(
             label="Save Detailed WAN Info",
             width=600,
             height=400,
             callback=lambda s, a: self.save_detailed_wan_info(a, csv_content),
             show=True,
-            modal=True,
             default_path=".",
             default_filename="wan_ips_detailed.csv",
-            file_count=0,  # This is for saving, not opening
+            file_count=0,
             tag="save_detailed_wan_dialog",
             directory_selector=False,
         ):
             dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
-    
+
     def save_detailed_wan_info(self, app_data, content):
         if app_data["file_path_name"]:
             file_path = app_data["file_path_name"]
             with open(file_path, "w", newline="\n") as f:
                 f.write(content)
-            self.show_status(f"Detailed WAN info saved to {file_path}!")
             self.add_log(f"Detailed WAN information saved to {file_path}")
         else:
             self.add_log("Detailed WAN information save cancelled")
 
     def show_amp_status(self):
-        self.current_view = "amp_status"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
             dpg.add_text("AMP Status", color=(255, 255, 0))
-            
+            self.add_log("Checking AMP status for all networks...")
+
             amp_statuses = self.meraki.check_amp_status()
 
             if not amp_statuses:
@@ -915,16 +1348,18 @@ class GUI:
                             dpg.add_text(network["name"])
                             dpg.add_text(
                                 "Yes" if amp_enabled else "No",
-                                color=(100, 255, 100) if amp_enabled else (255, 100, 100),
+                                color=(100, 255, 100)
+                                if amp_enabled
+                                else (255, 100, 100),
                             )
 
     def show_ids_ips_status(self):
-        self.current_view = "ids_ips_status"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
             dpg.add_text("IDS/IPS Status", color=(255, 255, 0))
-            
+            self.add_log("Checking IDS/IPS status for all networks...")
+
             ids_ips_statuses = self.meraki.check_ids_ips_status()
 
             if not ids_ips_statuses:
@@ -942,23 +1377,39 @@ class GUI:
                         )
                         with dpg.table_row():
                             dpg.add_text(network["name"])
-                            dpg.add_text(
-                                status["mode"],
-                                color=(100, 255, 100) if status["mode"] == "prevention" else (255, 100, 100),
+                            mode_color = (
+                                (100, 255, 100)
+                                if status["mode"] == "prevention"
+                                else (
+                                    (255, 255, 0)
+                                    if status["mode"] == "detection"
+                                    else (255, 100, 100)
+                                )
                             )
+                            dpg.add_text(status["mode"], color=mode_color)
                             dpg.add_text(status["ruleset"])
 
     def show_port_forwarding_check(self):
-        self.current_view = "port_forwarding"
         dpg.delete_item("content_window", children_only=True)
 
         with dpg.group(parent="content_window"):
             dpg.add_text("Port Forwarding Check", color=(255, 255, 0))
-            
+            self.add_log("Checking port forwarding rules for all networks...")
+
             insecure_rules = self.meraki.check_port_forwarding_status()
 
+            networks_with_issues = sum(1 for rules in insecure_rules.values() if rules)
+            total_networks = len(self.meraki.networks)
+
+            dpg.add_text(
+                f"Networks with insecure rules: {networks_with_issues}/{total_networks}",
+                color=(255, 100, 100) if networks_with_issues > 0 else (100, 255, 100),
+            )
+
             if not any(insecure_rules.values()):
-                dpg.add_text("No insecure port forwarding rules found", color=(255, 255, 0))
+                dpg.add_text(
+                    "No insecure port forwarding rules found", color=(100, 255, 100)
+                )
             else:
                 with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
@@ -970,106 +1421,23 @@ class GUI:
                         if rules:
                             with dpg.table_row():
                                 dpg.add_text(network["name"])
-                                dpg.add_text(str(rules), wrap=400)
 
-    def show_l3_rules(self):
-        self.current_view = "l3_rules"
-        dpg.delete_item("content_window", children_only=True)
+                                # Format rules for better readability
+                                rules_text = ""
+                                for i, rule in enumerate(rules):
+                                    rule_desc = f"{rule.get('name', 'Unnamed')} - "
+                                    rule_desc += f"{rule.get('protocol', '?')} {rule.get('publicPort', '?')}"
+                                    rule_desc += f" -> {rule.get('localIp', '?')}:{rule.get('localPort', '?')}"
+                                    rules_text += rule_desc + "\n"
 
-        with dpg.group(parent="content_window"):
-            dpg.add_text("L3 Rules Deployment", color=(255, 255, 0))
-            
-            dpg.add_button(
-                label="Load L3 Rules CSV", callback=self.load_l3_rules_csv, width=200
-            )
-
-            if self.l3_rules:
-                dpg.add_text("Loaded L3 Rules:", color=(255, 255, 0))
-                
-                with dpg.table(header_row=True, borders_innerH=True):
-                    dpg.add_table_column(label="Policy", width=100)
-                    dpg.add_table_column(label="Protocol", width=100)
-                    dpg.add_table_column(label="Dest Port", width=120)
-                    dpg.add_table_column(label="Dest CIDR", width=120)
-                    dpg.add_table_column(label="Src Port", width=120)
-                    dpg.add_table_column(label="Src CIDR", width=120)
-
-                    for rule in self.l3_rules:
-                        with dpg.table_row():
-                            dpg.add_text(rule["policy"])
-                            dpg.add_text(rule["protocol"])
-                            dpg.add_text(rule["destPort"])
-                            dpg.add_text(rule["destCidr"])
-                            dpg.add_text(rule["srcPort"])
-                            dpg.add_text(rule["srcCidr"])
-
-                dpg.add_button(
-                    label="Select Target Networks",
-                    callback=lambda: self.show_network_selection(
-                        "Select Target Networks for L3 Rules", True
-                    ),
-                    width=200,
-                )
-
-                if self.selected_targets:
-                    dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
-                    dpg.add_button(
-                        label="Deploy L3 Rules",
-                        callback=self.deploy_l3_rules,
-                        width=200,
-                    )
-
-    def load_l3_rules_csv(self):
-        with dpg.file_dialog(
-            label="Load L3 Rules CSV",
-            width=600,
-            height=400,
-            callback=self.handle_l3_rules_csv_load,
-            show=True,
-            modal=True,
-            default_path=".",
-            file_count=1,
-            tag="l3_rules_file_dialog",
-        ):
-            dpg.add_file_extension(".csv", color=(0, 255, 0, 255))
-
-    def handle_l3_rules_csv_load(self, sender, app_data):
-        if app_data["file_path_name"]:
-            file_path = app_data["file_path_name"]
-            self.add_log(f"Loading L3 rules from CSV file: {file_path}")
-            self.l3_rules = self.meraki.parse_l3_rules_csv(file_path)
-            self.add_log(f"Loaded {len(self.l3_rules)} L3 rules from CSV")
-            self.show_l3_rules()
-
-    def deploy_l3_rules(self):
-        if not self.selected_targets:
-            self.show_status("Please select target networks first")
-            self.add_log("L3 rules deployment failed: No target networks selected")
-            return
-
-        self.show_status("Starting L3 rules deployment...")
-        self.add_log(f"Starting L3 rules deployment to {len(self.selected_targets)} networks")
-        success_count = 0
-        total = len(self.selected_targets)
-
-        for idx, target_id in enumerate(self.selected_targets, 1):
-            network_name = self.get_network_name(target_id)
-            self.show_status(f"Deploying to {network_name} ({idx}/{total})")
-            self.add_log(f"Deploying L3 rules to {network_name} ({idx}/{total})")
-
-            if self.meraki.deploy_l3_rules(target_id, self.l3_rules):
-                success_count += 1
-
-        result_message = f"L3 rules deployment complete: {success_count}/{total} successful"
-        self.show_status(result_message, duration=5000)
-        self.add_log(result_message)
+                                dpg.add_text(rules_text, wrap=400)
 
     def run(self):
         viewport_width = 1024
         viewport_height = 768
 
         dpg.create_viewport(
-            title="Mirage", width=viewport_width, height=viewport_height
+            title="Mirage v0.4", width=viewport_width, height=viewport_height
         )
         dpg.set_viewport_resize_callback(self.resize_windows)
         self.resize_windows(None, [viewport_width, viewport_height])
@@ -1083,6 +1451,7 @@ class GUI:
         viewport_width = dpg.get_viewport_width()
         viewport_height = dpg.get_viewport_height()
 
+        # Resize auth window
         auth_width = 400
         auth_height = 150
         dpg.configure_item(
@@ -1095,40 +1464,32 @@ class GUI:
             ],
         )
 
+        # Resize main window
         dpg.configure_item(
             "main_window", width=viewport_width, height=viewport_height, pos=[0, 0]
         )
 
-        # Calculate heights for content and console areas
+        # Set content heights
         console_height = 150
-        main_content_height = viewport_height - console_height - 60  # Accounting for menu bar and padding
-        
-        # Configure main content group
-        dpg.configure_item("main_content_group", height=main_content_height)
-        
-        # Configure sidebar
-        dpg.configure_item("sidebar_window", height=main_content_height)
-        
-        # Configure content window
-        content_width = viewport_width - 200
-        dpg.configure_item(
-            "content_window", width=content_width, height=main_content_height
-        )
-        
-        # Configure console
-        dpg.configure_item("console_window", width=viewport_width-20, height=console_height)
+        main_content_height = (
+            viewport_height - console_height - 80
+        )  # Allow for status bar
 
-        if dpg.is_item_shown("status_window"):
-            status_width = 300
-            status_height = 100
+        if dpg.does_item_exist("main_content_group"):
+            dpg.configure_item("main_content_group", height=main_content_height)
+
+        if dpg.does_item_exist("sidebar_window"):
+            dpg.configure_item("sidebar_window", height=main_content_height)
+
+        content_width = viewport_width - 200
+        if dpg.does_item_exist("content_window"):
             dpg.configure_item(
-                "status_window",
-                width=status_width,
-                height=status_height,
-                pos=[
-                    (viewport_width - status_width) // 2,
-                    (viewport_height - status_height) // 2,
-                ],
+                "content_window", width=content_width, height=main_content_height
+            )
+
+        if dpg.does_item_exist("console_window"):
+            dpg.configure_item(
+                "console_window", width=viewport_width - 20, height=console_height
             )
 
 
