@@ -34,15 +34,15 @@ python3 mirage.py
 # Features
 - Minimalist, simple, cross-platform GUI interface (Windows, macOS, Linux)
 - Deploy changes to MX appliances across different networks simultaneously:
-    - L7 Firewall rules (clone config from a baseline network to thousands in 3 clicks )
-    - L3 Firewall rules from csv
-    - Content Filtering(Coming Soon)
+    - L7 Firewall rules (clone config from a baseline network to thousands in 3 clicks)
+    - L3 Firewall rules from/to csv 
+    - Content Filtering (clone config from a baseline network to thousands in 3 clicks)
 - Security Auditing capabilities:
     - Extract all public IPs from all your appliances across all networks (even when using multiple WAN's)
     - Lookup IPs via Censys or Shodan to identify exposed ports and assets (Coming Soon)
     - Check IDS (Intrusion Prevention System) status and configuration across all appliances
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
-    - Check Unsecure Port Forwarding configs 
+    - Check Unsecure Port Forwarding configs (no Source IP restrictions) 
 
 ![alt text](assets/preview.png)
 
@@ -50,7 +50,7 @@ python3 mirage.py
 - Zero persistent storage of sensitive data 
 - No telemetry 
 - Secure API communication
-- Minimal dependencies with permissive licenses (only 2 libs: meraki & dearpygui)
+- Minimal dependencies with buisness friendly licenses (only 2 libs: meraki & dearpygui)
 
 # Related Resources
 - [Cisco Meraki Dashboard API Documentation](https://developer.cisco.com/meraki/api-v1/)
