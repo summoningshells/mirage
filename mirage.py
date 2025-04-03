@@ -39,6 +39,8 @@ class MerakiManager:
         self.networks: List[Dict] = []
         self.baseline_rules: List[Dict] = []
         self.baseline_content_filtering: Dict = {}
+        self.baseline_amp_settings: Dict = {}
+        self.baseline_ids_ips_settings: Dict = {}
         self.rate_limiter = RateLimiter()
         self.log_callback = None
 
@@ -210,6 +212,60 @@ class MerakiManager:
             self.log(f"Error deploying L3 rules to network {target_network_id}: {e}")
             return False
 
+    def get_amp_settings(self, network_id: str) -> Dict:
+        settings = self._execute_api_call(
+            self.dashboard.appliance.getNetworkApplianceSecurityMalware,
+            "Error fetching AMP settings",
+            network_id,
+        )
+        self.baseline_amp_settings = settings
+        return settings
+
+    def deploy_amp_settings(self, target_network_id: str, amp_enabled: bool) -> bool:
+        try:
+            self.rate_limiter.wait_if_needed()
+            self.dashboard.appliance.updateNetworkApplianceSecurityMalware(
+                target_network_id, mode="enabled" if amp_enabled else "disabled"
+            )
+            self.log(
+                f"Successfully deployed AMP settings to network {target_network_id}"
+            )
+            return True
+        except Exception as e:
+            self.log(
+                f"Error deploying AMP settings to network {target_network_id}: {e}"
+            )
+            return False
+
+    def get_ids_ips_settings(self, network_id: str) -> Dict:
+        settings = self._execute_api_call(
+            self.dashboard.appliance.getNetworkApplianceSecurityIntrusion,
+            "Error fetching IDS/IPS settings",
+            network_id,
+        )
+        self.baseline_ids_ips_settings = settings
+        return settings
+
+    def deploy_ids_ips_settings(
+        self, target_network_id: str, mode: str, ruleset: str = "connectivity"
+    ) -> bool:
+        try:
+            self.rate_limiter.wait_if_needed()
+            self.dashboard.appliance.updateNetworkApplianceSecurityIntrusion(
+                target_network_id,
+                mode=mode,
+                idsRulesets=ruleset if mode != "disabled" else "none",
+            )
+            self.log(
+                f"Successfully deployed IDS/IPS settings to network {target_network_id}"
+            )
+            return True
+        except Exception as e:
+            self.log(
+                f"Error deploying IDS/IPS settings to network {target_network_id}: {e}"
+            )
+            return False
+
     def export_l3_rules_to_csv(self, network_id: str, output_file: str) -> bool:
         try:
             rules = self.get_l3_rules(network_id)
@@ -231,7 +287,6 @@ class MerakiManager:
                 )
                 csv_writer.writeheader()
                 for rule in rules:
-                    # Ensure all fields exist in the rule
                     rule_row = {field: rule.get(field, "") for field in field_names}
                     csv_writer.writerow(rule_row)
 
@@ -252,11 +307,9 @@ class MerakiManager:
                     rule = {}
                     for field in field_names:
                         if field in row:
-                            # Convert empty strings to None for optional fields
                             if row[field] == "":
                                 continue
 
-                            # Convert string "True"/"False" to boolean for syslogEnabled
                             if field == "syslogEnabled":
                                 rule[field] = row[field].lower() == "true"
                             else:
@@ -449,6 +502,8 @@ class ViewType(Enum):
     AMP_STATUS = 6
     PORT_FORWARDING = 7
     NETWORK_SELECTION = 8
+    AMP_DEPLOYMENT = 9
+    IDS_IPS_DEPLOYMENT = 10
 
 
 class GUI:
@@ -484,7 +539,6 @@ class GUI:
     def setup_gui(self):
         dpg.create_context()
 
-        # authentication window
         with dpg.window(
             label="Meraki Authentication",
             tag="auth_window",
@@ -502,9 +556,8 @@ class GUI:
             )
             dpg.add_button(label="Connect", callback=self.authenticate)
 
-        # Main application window
         with dpg.window(
-            label="Mirage - V0.4",
+            label="Mirage - V0.5",
             tag="main_window",
             show=False,
             no_resize=True,
@@ -525,9 +578,7 @@ class GUI:
                     )
 
             with dpg.group(horizontal=False):
-                # Main content area (sidebar + content)
                 with dpg.group(horizontal=True, tag="main_content_group"):
-                    # Sidebar with navigation buttons
                     with dpg.child_window(
                         width=200, border=False, tag="sidebar_window"
                     ):
@@ -549,6 +600,20 @@ class GUI:
                             dpg.add_button(
                                 label="L3 Rules",
                                 callback=lambda: self.change_view(ViewType.L3_RULES),
+                                width=-1,
+                            )
+                            dpg.add_button(
+                                label="AMP Deployment",
+                                callback=lambda: self.change_view(
+                                    ViewType.AMP_DEPLOYMENT
+                                ),
+                                width=-1,
+                            )
+                            dpg.add_button(
+                                label="IDS/IPS Deployment",
+                                callback=lambda: self.change_view(
+                                    ViewType.IDS_IPS_DEPLOYMENT
+                                ),
                                 width=-1,
                             )
                         with dpg.collapsing_header(
@@ -579,16 +644,14 @@ class GUI:
                                 width=-1,
                             )
 
-                    # Main content window
                     with dpg.child_window(tag="content_window", border=False):
                         pass
 
-                # console and status bar
                 with dpg.collapsing_header(
                     label="Console", default_open=True, tag="console_header"
                 ):
                     with dpg.child_window(
-                        tag="console_window", height=150, horizontal_scrollbar=True
+                        tag="console_window", height=140, horizontal_scrollbar=True
                     ):
                         dpg.add_text("", tag="console_text", wrap=0)
 
@@ -646,6 +709,28 @@ class GUI:
                     extra_data.get("multi_select", False),
                     extra_data.get("callback", None),
                 )
+
+        elif view_type == ViewType.AMP_DEPLOYMENT:
+            self.deploy_option = "amp"
+            if not self.selected_baseline:
+                self.show_network_selection(
+                    "Select Baseline Network for AMP",
+                    False,
+                    self.handle_amp_baseline_selection,
+                )
+            else:
+                self.show_amp_deployment_interface()
+
+        elif view_type == ViewType.IDS_IPS_DEPLOYMENT:
+            self.deploy_option = "ids_ips"
+            if not self.selected_baseline:
+                self.show_network_selection(
+                    "Select Baseline Network for IDS/IPS",
+                    False,
+                    self.handle_ids_ips_baseline_selection,
+                )
+            else:
+                self.show_ids_ips_deployment_interface()
 
     def show_network_selection(
         self, title: str, multi_select: bool = False, callback: Callable = None
@@ -737,6 +822,8 @@ class GUI:
                 "handle_l7_baseline_selection",
                 "handle_content_filtering_baseline_selection",
                 "handle_l3_network_selection",
+                "handle_amp_baseline_selection",
+                "handle_ids_ips_baseline_selection",
             ]:
                 multi_select = False
             else:
@@ -744,14 +831,12 @@ class GUI:
         self.update_network_table(multi_select)
 
     def update_network_table(self, multi_select: bool):
-        # Remove all rows
         if dpg.does_item_exist("networks_table"):
             children = dpg.get_item_children("networks_table", slot=1)
             if children:
                 for child in children:
                     dpg.delete_item(child)
 
-            # Add new rows based on filtered networks
             filtered_networks = self.filter_and_sort_networks()
 
             if not filtered_networks:
@@ -809,6 +894,10 @@ class GUI:
             self.show_content_filtering_interface()
         elif self.deploy_option == "l3":
             self.show_l3_rules()
+        elif self.deploy_option == "amp":
+            self.show_amp_deployment_interface()
+        elif self.deploy_option == "ids_ips":
+            self.show_ids_ips_deployment_interface()
         else:
             self.show_l7_deployment_interface()
 
@@ -858,6 +947,17 @@ class GUI:
                 return
             deploy_function = lambda target_id: self.meraki.deploy_l3_rules(
                 target_id, self.l3_rules
+            )
+        elif deploy_type == "amp":
+            amp_enabled = dpg.get_value("amp_enabled_checkbox")
+            deploy_function = lambda target_id: self.meraki.deploy_amp_settings(
+                target_id, amp_enabled
+            )
+        elif deploy_type == "ids_ips":
+            mode = dpg.get_value("ids_ips_mode_combo")
+            ruleset = dpg.get_value("ids_ips_ruleset_combo")
+            deploy_function = lambda target_id: self.meraki.deploy_ids_ips_settings(
+                target_id, mode, ruleset
             )
         else:  # l7
             deploy_function = self.meraki.deploy_l7_rules
@@ -955,6 +1055,12 @@ class GUI:
     def handle_content_filtering_baseline_selection(self):
         self.show_content_filtering_interface()
 
+    def handle_amp_baseline_selection(self):
+        self.show_amp_deployment_interface()
+
+    def handle_ids_ips_baseline_selection(self):
+        self.show_ids_ips_deployment_interface()
+
     def handle_l3_network_selection(self):
         if self.selected_baseline:
             self.l3_rules = self.meraki.get_l3_rules(self.selected_baseline)
@@ -980,22 +1086,10 @@ class GUI:
 
     def reset_baseline(self):
         self.selected_baseline = None
-        if self.deploy_option == "content_filtering":
-            self.change_view(ViewType.CONTENT_FILTERING)
-        elif self.deploy_option == "l3":
-            self.change_view(ViewType.L3_RULES)
-        else:
-            self.change_view(ViewType.L7_RULES)
+        self.change_view(self.current_view)
 
     def select_deployment_targets(self):
-        callback = None
-        if self.deploy_option == "content_filtering":
-            callback = lambda: self.change_view(ViewType.CONTENT_FILTERING)
-        elif self.deploy_option == "l3":
-            callback = lambda: self.change_view(ViewType.L3_RULES)
-        else:
-            callback = lambda: self.change_view(ViewType.L7_RULES)
-
+        callback = lambda: self.change_view(self.current_view)
         self.show_network_selection("Select Target Networks", True, callback)
 
     def show_content_filtering_interface(self):
@@ -1058,6 +1152,109 @@ class GUI:
 
             self.add_deployment_buttons()
 
+    def show_amp_deployment_interface(self):
+        if not self.selected_baseline:
+            self.add_log("⚠️ No baseline network selected for AMP deployment")
+            self.show_network_selection(
+                "Select Baseline Network for AMP",
+                False,
+                self.handle_amp_baseline_selection,
+            )
+            return
+
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Baseline Network:", color=(255, 255, 0))
+                dpg.add_text(self.get_network_name(self.selected_baseline))
+
+            dpg.add_text("Current AMP Configuration:", color=(255, 255, 0))
+
+            amp_settings = self.meraki.get_amp_settings(self.selected_baseline)
+            amp_enabled = amp_settings.get("mode", "disabled") == "enabled"
+
+            dpg.add_text(
+                f"AMP is currently {'ENABLED' if amp_enabled else 'DISABLED'}",
+                color=(100, 255, 100) if amp_enabled else (255, 100, 100),
+            )
+
+            dpg.add_text("Deployment Configuration:", color=(255, 255, 0))
+            dpg.add_checkbox(
+                label="Enable Advanced Malware Protection (AMP)",
+                tag="amp_enabled_checkbox",
+                default_value=amp_enabled,
+            )
+
+            self.add_deployment_buttons()
+
+    def show_ids_ips_deployment_interface(self):
+        if not self.selected_baseline:
+            self.add_log("⚠️ No baseline network selected for IDS/IPS deployment")
+            self.show_network_selection(
+                "Select Baseline Network for IDS/IPS",
+                False,
+                self.handle_ids_ips_baseline_selection,
+            )
+            return
+
+        dpg.delete_item("content_window", children_only=True)
+
+        with dpg.group(parent="content_window"):
+            with dpg.group(horizontal=True):
+                dpg.add_text("Baseline Network:", color=(255, 255, 0))
+                dpg.add_text(self.get_network_name(self.selected_baseline))
+
+            dpg.add_text("Current IDS/IPS Configuration:", color=(255, 255, 0))
+
+            ids_settings = self.meraki.get_ids_ips_settings(self.selected_baseline)
+            current_mode = ids_settings.get("mode", "disabled")
+            current_ruleset = ids_settings.get("idsRulesets", "none")
+
+            mode_color = (
+                (100, 255, 100)
+                if current_mode == "prevention"
+                else ((255, 255, 0) if current_mode == "detection" else (255, 100, 100))
+            )
+
+            dpg.add_text(f"IDS/IPS Mode: {current_mode}", color=mode_color)
+            dpg.add_text(f"IDS/IPS Ruleset: {current_ruleset}")
+
+            dpg.add_text("Deployment Configuration:", color=(255, 255, 0))
+
+            dpg.add_combo(
+                tag="ids_ips_mode_combo",
+                items=["disabled", "detection", "prevention"],
+                default_value=current_mode,
+                width=200,
+                label="IDS/IPS Mode",
+            )
+
+            dpg.add_combo(
+                tag="ids_ips_ruleset_combo",
+                items=["connectivity", "balanced", "security"],
+                default_value=current_ruleset
+                if current_ruleset != "none"
+                else "connectivity",
+                width=200,
+                label="IDS/IPS Ruleset",
+            )
+
+            # Add help text
+            with dpg.group(horizontal=True):
+                dpg.add_text("Mode: ", indent=20)
+                dpg.add_text(
+                    "disabled = off, detection = alert only, prevention = block threats"
+                )
+
+            with dpg.group(horizontal=True):
+                dpg.add_text("Ruleset: ", indent=20)
+                dpg.add_text(
+                    "connectivity = minimal, balanced = recommended, security = strict"
+                )
+
+            self.add_deployment_buttons()
+
     def show_l3_rules(self):
         dpg.delete_item("content_window", children_only=True)
 
@@ -1108,7 +1305,6 @@ class GUI:
 
                 self.display_l3_rules_table()
 
-                # show deployment info if targets selected
                 if self.selected_targets:
                     with dpg.group(horizontal=True):
                         dpg.add_text(f"Selected Targets: {len(self.selected_targets)}")
@@ -1118,7 +1314,6 @@ class GUI:
                             width=150,
                         )
             elif self.selected_baseline:
-                # display current network rules if we have a baseline but no imported rules
                 self.display_l3_rules(self.selected_baseline)
 
     def display_l3_rules(self, network_id):
@@ -1223,12 +1418,10 @@ class GUI:
         if imported_rules:
             self.rules_imported = True
 
-            # clear the baseline - we now using imported rules instead
-            # imported rules take precedence
+            # clear the baseline - we now using imported rules instead(they tkae precedence
             self.l3_rules = imported_rules
 
             self.add_log(f"Successfully imported {len(self.l3_rules)} L3 rules")
-            # refresh the display
             self.show_l3_rules()
         else:
             self.add_log("⚠️ Failed to import L3 rules")
@@ -1238,7 +1431,6 @@ class GUI:
             self.add_log("⚠️ No L3 rules to deploy")
             return
 
-        # use lambda that doesn't interfere with baseline selection
         self.show_network_selection(
             "Select Target Networks for L3 Rules Deployment",
             True,
@@ -1330,13 +1522,27 @@ class GUI:
 
         with dpg.group(parent="content_window"):
             dpg.add_text("AMP Status", color=(255, 255, 0))
-            self.add_log("Checking AMP status for all networks...")
+
+            with dpg.group(horizontal=True):
+                dpg.add_text("Checking AMP status for all networks...")
 
             amp_statuses = self.meraki.check_amp_status()
 
             if not amp_statuses:
                 dpg.add_text("No AMP statuses found", color=(255, 255, 0))
             else:
+                enabled_count = sum(
+                    1 for is_enabled in amp_statuses.values() if is_enabled
+                )
+                total_count = len(amp_statuses)
+
+                dpg.add_text(
+                    f"Networks with AMP enabled: {enabled_count}/{total_count}",
+                    color=(100, 255, 100)
+                    if enabled_count == total_count
+                    else (255, 255, 0),
+                )
+
                 with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
                     dpg.add_table_column(label="AMP Enabled", width=100)
@@ -1358,13 +1564,36 @@ class GUI:
 
         with dpg.group(parent="content_window"):
             dpg.add_text("IDS/IPS Status", color=(255, 255, 0))
-            self.add_log("Checking IDS/IPS status for all networks...")
+
+            with dpg.group(horizontal=True):
+                dpg.add_text("Checking IDS/IPS status for all networks...")
 
             ids_ips_statuses = self.meraki.check_ids_ips_status()
 
             if not ids_ips_statuses:
                 dpg.add_text("No IDS/IPS statuses found", color=(255, 255, 0))
             else:
+                prevention_count = sum(
+                    1
+                    for status in ids_ips_statuses.values()
+                    if status.get("mode") == "prevention"
+                )
+                detection_count = sum(
+                    1
+                    for status in ids_ips_statuses.values()
+                    if status.get("mode") == "detection"
+                )
+                total_count = len(ids_ips_statuses)
+
+                dpg.add_text(
+                    f"Networks with prevention: {prevention_count}/{total_count}",
+                    color=(100, 255, 100) if prevention_count > 0 else (255, 255, 0),
+                )
+                dpg.add_text(
+                    f"Networks with detection only: {detection_count}/{total_count}",
+                    color=(255, 255, 0),
+                )
+
                 with dpg.table(header_row=True, borders_innerH=True):
                     dpg.add_table_column(label="Network Name", width=400)
                     dpg.add_table_column(label="Mode", width=100)
@@ -1422,7 +1651,6 @@ class GUI:
                             with dpg.table_row():
                                 dpg.add_text(network["name"])
 
-                                # Format rules for better readability
                                 rules_text = ""
                                 for i, rule in enumerate(rules):
                                     rule_desc = f"{rule.get('name', 'Unnamed')} - "
@@ -1437,7 +1665,7 @@ class GUI:
         viewport_height = 768
 
         dpg.create_viewport(
-            title="Mirage v0.4", width=viewport_width, height=viewport_height
+            title="Mirage v0.5", width=viewport_width, height=viewport_height
         )
         dpg.set_viewport_resize_callback(self.resize_windows)
         self.resize_windows(None, [viewport_width, viewport_height])
@@ -1451,7 +1679,6 @@ class GUI:
         viewport_width = dpg.get_viewport_width()
         viewport_height = dpg.get_viewport_height()
 
-        # Resize auth window
         auth_width = 400
         auth_height = 150
         dpg.configure_item(
@@ -1464,16 +1691,12 @@ class GUI:
             ],
         )
 
-        # Resize main window
         dpg.configure_item(
             "main_window", width=viewport_width, height=viewport_height, pos=[0, 0]
         )
 
-        # Set content heights
         console_height = 150
-        main_content_height = (
-            viewport_height - console_height - 80
-        )  # Allow for status bar
+        main_content_height = viewport_height - console_height - 80
 
         if dpg.does_item_exist("main_content_group"):
             dpg.configure_item("main_content_group", height=main_content_height)
@@ -1497,7 +1720,6 @@ def main():
     gui = GUI()
     gui.setup_gui()
     gui.run()
-
 
 if __name__ == "__main__":
     main()
