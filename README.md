@@ -1,6 +1,6 @@
 # M.I.R.A.G.E: Meraki Infrastructure Rapid Automation and Governance Engine
 A simple cross-platform GUI tool for security, deployment & auditing of Cisco Meraki MX appliances.
-![alt text](assets/logo.png)
+![alt text](assets/preview.gif)
 # Install 
 ## install and use natively anywhere
 ```
@@ -44,7 +44,7 @@ python3 mirage.py
     - Check AMP (Advanced Malware Protection) status and configuration across all appliances
     - Check Unsecure Port Forwarding configs (no Source IP restrictions) 
 
-![alt text](assets/preview.png)
+
 
 # Security Features & Philosophy
 - Zero persistent storage of sensitive data 
